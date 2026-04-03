@@ -1,0 +1,25 @@
+{
+  "name": "@sendflow/sendflow-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit -p tsconfig.json",
+    "start": "bun --env-file=../../.env --env-file=.env run src/index.ts"
+  },
+  "dependencies": {
+    "@elizaos/core": "2.0.0-alpha.77",
+    "@elizaos/plugin-telegram": "2.0.0-alpha.11",
+    "@sendflow/plugin-intent-parser": "workspace:*",
+    "@sendflow/plugin-notifier": "workspace:*",
+    "@sendflow/plugin-payout-router": "workspace:*",
+    "@sendflow/plugin-rate-checker": "workspace:*",
+    "@sendflow/plugin-usdc-handler": "workspace:*",
+    "@solana/web3.js": "^1.98.4",
+    "bs58": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.8.3"
+  }
+}

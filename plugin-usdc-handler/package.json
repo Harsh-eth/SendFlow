@@ -1,0 +1,24 @@
+{
+  "name": "@sendflow/plugin-usdc-handler",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsup",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@elizaos/core": "2.0.0-alpha.77",
+    "@sendflow/plugin-intent-parser": "workspace:*",
+    "@solana/web3.js": "^1.98.4",
+    "@solana/spl-token": "^0.4.13",
+    "bs58": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsup": "^8.5.0",
+    "typescript": "^5.8.3"
+  }
+}

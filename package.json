@@ -1,0 +1,23 @@
+{
+  "name": "sendflow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SendFlow - Solana-native USDC remittance agent (ElizaOS v2 monorepo)",
+  "type": "module",
+  "workspaces": [
+    "plugin-intent-parser",
+    "plugin-rate-checker",
+    "plugin-usdc-handler",
+    "plugin-payout-router",
+    "plugin-notifier",
+    "sendflow-agent"
+  ],
+  "scripts": {
+    "build": "bun run --filter '*' build",
+    "test": "bun run --filter '*' test"
+  },
+  "packageManager": "bun@1.2.11",
+  "engines": {
+    "bun": ">=1.0.0"
+  }
+}
