@@ -11,10 +11,12 @@ import { join } from "node:path";
 import type { IAgentRuntime } from "@elizaos/core";
 import { classifyMessage, resetThreatClassifierBurstStateForTests } from "./threatClassifier";
 import { getCustodialWallet } from "./custodialWallet";
-import { checkTierLimit, buildKycLink } from "./offrampOracle";
+import { checkTierLimit } from "./offrampOracle";
 import { formatAdminStatusMessage } from "./adminStatus";
 import { getBestYield } from "./savingsVault";
 import { generateTransferReceiptPng } from "./receiptCard";
+import { getP2PMarketSummaryHtml } from "./p2pMarketSummary";
+import { getMarketPulse } from "./marketPulse";
 
 const USDC_MINT = () => new PublicKey(process.env.USDC_MINT ?? "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 const DEMO_RECIPIENT = () =>
@@ -142,6 +144,10 @@ export async function runDemo(
   };
 
   await sendHtml(adminChatId, "🎬 <b>SendFlow hardened demo</b> — state machine with recovery. Starting…");
+  await sendHtml(adminChatId, "👋 <b>SendFlow Demo — P2P Marketplace</b>");
+  await sendHtml(adminChatId, getP2PMarketSummaryHtml());
+  await sendHtml(adminChatId, "Step 1–2: In Telegram, try <code>Sell 100 USDC</code> / <code>Buy 50 USDC</code> — escrow + optional payment proof.");
+  await sendHtml(adminChatId, `Market pulse: ${await getMarketPulse(connection)}`);
 
   await runStep(1, "Fresh ephemeral wallet (never reused)", {
     action: async (c) => {
@@ -265,39 +271,36 @@ export async function runDemo(
     fallback: "Burst demo failed.",
   });
 
-  await runStep(8, "Off-ramp under Tier 0 — Transak link", {
+  await runStep(8, "P2P sell — velocity tier (small size)", {
     action: async () => {
-      const w = await getCustodialWallet(adminChatId);
-      const addr = w?.publicKey ?? "11111111111111111111111111111111";
       const tier = await checkTierLimit(adminChatId, 40, 0);
-      const link = buildKycLink("transak", 1, adminChatId, 40, addr);
-      await sendHtml(
-        adminChatId,
-        `🏦 <b>Off-ramp (demo $40, Tier 0)</b>\nAllowed: ${tier.allowed}\n🔗 <a href="${link}">Open Transak</a>`
-      );
-    },
-    verify: async () => true,
-    fallback: "Tier check link failed.",
-  });
-
-  await runStep(9, "Off-ramp above Tier 1 — KYC prompt", {
-    action: async () => {
-      const w = await getCustodialWallet(adminChatId);
-      const addr = w?.publicKey ?? "11111111111111111111111111111111";
-      const tier = await checkTierLimit(adminChatId, 600, 1);
-      const link = buildKycLink("transak", 2, adminChatId, 600, addr);
       await sendHtml(
         adminChatId,
         [
-          `🔐 <b>Large off-ramp ($600)</b>`,
-          `Policy: <code>${tier.allowed ? "allowed" : "needs review"}</code>`,
-          `Complete verification:`,
-          `<a href="${link}">Tier 2 KYC (Transak)</a>`,
+          `🏦 <b>P2P cash-out (demo ~$40, Tier 0)</b>`,
+          `Velocity: <code>${tier.allowed ? "allowed" : "paused"}</code>`,
+          `Users sell via in-bot P2P: <code>Sell 40 USDC</code> — USDC in escrow until buyer pays fiat (no external sell URLs).`,
         ].join("\n")
       );
     },
     verify: async () => true,
-    fallback: "KYC demo step failed.",
+    fallback: "Tier check demo failed.",
+  });
+
+  await runStep(9, "P2P sell — large notional (tier policy)", {
+    action: async () => {
+      const tier = await checkTierLimit(adminChatId, 600, 1);
+      await sendHtml(
+        adminChatId,
+        [
+          `🔐 <b>Large P2P listing (~$600)</b>`,
+          `Policy: <code>${tier.allowed ? "allowed" : "needs review"}</code>`,
+          `Same P2P flow; higher tiers unlock larger per-trade limits (<code>P2P_MAX_TRADE_*</code>).`,
+        ].join("\n")
+      );
+    },
+    verify: async () => true,
+    fallback: "Large-notional demo failed.",
   });
 
   await runStep(10, "Live metrics (/admin status)", {
@@ -345,5 +348,8 @@ export async function runDemo(
     fallback: "DeFiLlama fetch failed — defaults shown if any.",
   });
 
-  await sendHtml(adminChatId, "✅ <b>Demo complete.</b> Judges: see /admin attack for live security theater.");
+  await sendHtml(
+    adminChatId,
+    "✅ <b>Full demo complete!</b>\n\nCash → USDC → Send → USDC → Cash\nZero platform fees.\n\nJudges: see <code>/admin attack</code> for live security theater."
+  );
 }

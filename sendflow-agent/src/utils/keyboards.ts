@@ -43,11 +43,109 @@ export const afterTransferKeyboard = rows(
 
 export const fundWalletKeyboard = rows(
   Markup.inlineKeyboard([
-    [Markup.button.url("Buy USDC with card", "https://buy.moonpay.com/?currencyCode=usdc_sol")],
+    [Markup.button.callback("💸 P2P: Buy USDC", "p2p_buy"), Markup.button.callback("P2P menu", "p2p_menu")],
     [Markup.button.callback("Copy wallet address", "copy_wallet")],
     [Markup.button.callback("Share wallet QR", "share_qr")],
   ])
 );
+
+export function p2pMainKeyboard(): InlineKeyboard {
+  return rows(
+    Markup.inlineKeyboard([
+      [Markup.button.callback("💸 Buy USDC", "p2p_buy"), Markup.button.callback("Sell USDC", "p2p_sell")],
+      [Markup.button.callback("View offers", "p2p_browse"), Markup.button.callback("My trades", "p2p_my_trades")],
+      [Markup.button.callback("Current rates", "p2p_rates"), Markup.button.callback("My reputation", "p2p_reputation")],
+    ])
+  );
+}
+
+function encodeRateCb(rate: number): string {
+  return `p2p_rate_${Math.round(rate * 10_000)}`;
+}
+
+export function p2pRateKeyboard(marketRate: number, currency: string): InlineKeyboard {
+  const below = marketRate * 0.999;
+  const above = marketRate * 1.001;
+  return rows(
+    Markup.inlineKeyboard([
+      [Markup.button.callback(`${currency} ${below.toFixed(2)} (below market)`, encodeRateCb(below))],
+      [Markup.button.callback(`${currency} ${marketRate.toFixed(2)} (market rate)`, encodeRateCb(marketRate))],
+      [Markup.button.callback(`${currency} ${above.toFixed(2)} (above market)`, encodeRateCb(above))],
+      [Markup.button.callback("Custom rate", "p2p_rate_custom")],
+    ])
+  );
+}
+
+export function p2pPaymentMethodKeyboard(): InlineKeyboard {
+  return rows(
+    Markup.inlineKeyboard([
+      [Markup.button.callback("UPI", "p2p_pm_upi"), Markup.button.callback("Bank transfer", "p2p_pm_bank_transfer")],
+      [Markup.button.callback("GCash", "p2p_pm_gcash"), Markup.button.callback("M-Pesa", "p2p_pm_mpesa")],
+      [Markup.button.callback("PayPal", "p2p_pm_paypal"), Markup.button.callback("Wise", "p2p_pm_wise")],
+      [Markup.button.callback("Cash in person", "p2p_pm_cash")],
+    ])
+  );
+}
+
+export function p2pTradeActionKeyboard(tradeId: string): InlineKeyboard {
+  return rows(
+    Markup.inlineKeyboard([
+      [Markup.button.callback("I have paid", `trade_paid_${tradeId}`)],
+      [Markup.button.callback("❌ Cancel trade", `trade_cancel_${tradeId}`)],
+    ])
+  );
+}
+
+export function p2pProofPromptKeyboard(tradeId: string): InlineKeyboard {
+  return rows(
+    Markup.inlineKeyboard([
+      [Markup.button.callback("Skip — I trust the seller", `p2p_proof_skip_${tradeId}`)],
+    ])
+  );
+}
+
+/** Partial-fill aware: custom amount when listing > min trade size. */
+export function p2pOfferActionsKeyboard(o: { offerId: string; usdcAmount: number; minAmount: number }): InlineKeyboard {
+  if (o.usdcAmount > o.minAmount + 1e-6) {
+    return rows(
+      Markup.inlineKeyboard([
+        [Markup.button.callback(`Trade (≤${o.usdcAmount} USDC)`, `trade_start_${o.offerId}`)],
+        [Markup.button.callback("Custom amount", `trade_custom_${o.offerId}`)],
+      ])
+    );
+  }
+  return rows(
+    Markup.inlineKeyboard([[Markup.button.callback("💸 Trade with this seller", `trade_start_${o.offerId}`)]])
+  );
+}
+
+export function p2pSellerActionKeyboard(tradeId: string): InlineKeyboard {
+  return rows(
+    Markup.inlineKeyboard([
+      [
+        Markup.button.callback("✅ Release USDC", `trade_release_${tradeId}`),
+        Markup.button.callback("❌ Dispute", `trade_dispute_${tradeId}`),
+      ],
+    ])
+  );
+}
+
+export function p2pOfferKeyboard(offerId: string): InlineKeyboard {
+  return rows(
+    Markup.inlineKeyboard([[Markup.button.callback("💸 Trade with this seller", `trade_start_${offerId}`)]])
+  );
+}
+
+export function adminDisputeKeyboard(tradeId: string): InlineKeyboard {
+  return rows(
+    Markup.inlineKeyboard([
+      [
+        Markup.button.callback("⚡ Release to buyer", `admin_release_buyer_${tradeId}`),
+        Markup.button.callback("Return to seller", `admin_release_seller_${tradeId}`),
+      ],
+    ])
+  );
+}
 
 export const loanKeyboard = rows(
   Markup.inlineKeyboard([

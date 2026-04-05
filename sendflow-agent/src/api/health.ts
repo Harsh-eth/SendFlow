@@ -41,6 +41,15 @@ export function startHealthServer(opts: {
   getQueueSize?: () => number;
   getEscrowBalance?: () => Promise<number | null>;
   ollamaOk?: () => boolean;
+  getP2pSnapshot?: () => {
+    openOffers: number;
+    openSellOffers: number;
+    openBuyOffers: number;
+    activeTrades: number;
+    completedToday: number;
+    volumeTodayUsdc: number;
+    disputeCount: number;
+  };
 }): Server | null {
   const port = Number(process.env.PORT ?? 3000);
   const webappPath = join(__dirname, "..", "..", "..", "sendflow-webapp", "index.html");
@@ -57,15 +66,18 @@ export function startHealthServer(opts: {
           solanaOk = false;
         }
         const escrowBal = opts.getEscrowBalance ? await opts.getEscrowBalance() : null;
+        const uptimeSec = Math.floor((Date.now() - metrics.startedAt) / 1000);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
             status: "ok",
-            uptimeSec: Math.floor((Date.now() - metrics.startedAt) / 1000),
+            uptime: uptimeSec,
+            uptimeSec,
             solanaConnected: solanaOk,
             ollamaConnected: opts.ollamaOk?.() ?? false,
             escrowBalance: escrowBal,
             queueSize: opts.getQueueSize?.() ?? 0,
+            p2p: opts.getP2pSnapshot?.() ?? null,
           })
         );
         return;

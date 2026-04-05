@@ -1,12 +1,43 @@
 # SendFlow — Send Money Anywhere. Just Ask.
 
-## The problem
+> Built for the [Nosana Builders Challenge: ElizaOS](https://earn.superteam.fun/listings/sendflow-nosana)
 
-Hundreds of millions of people pay **5–8%** to Western Union and MoneyGram, wait **days**, or get **frozen out** by PayPal and banks. Freelancers lose clients who will not wire money. Shops pay **~3% card fees** or cannot take digital payments at all. Most crypto products make it worse: seed phrases, browser extensions, and jargon for people who only want to **send or receive dollars**.
+[![Demo Video](https://img.shields.io/badge/Demo-Watch%20Now-red)](YOUR_VIDEO_LINK)
+[![Live Bot](https://img.shields.io/badge/Telegram-@SendFlowSol__bot-blue)](https://t.me/SendFlowSol_bot)
+[![Nosana](https://img.shields.io/badge/Powered%20by-Nosana%20GPU-green)](https://nosana.com)
+[![Solana](https://img.shields.io/badge/Built%20on-Solana-purple)](https://solana.com)
 
-## The solution
+## The Problem
 
-Open **Telegram**. Type **“Send $50 to Mom”** or **“Charge my customer 50 USDC”**. SendFlow creates a **custodial Solana wallet**, speaks in plain language, moves **USDC** on-chain in seconds, and shows **estimated savings vs Western Union** after transfers. Add money with **MoonPay / Transak / Coinbase Pay** (where available); cash out via **Transak / MoonPay** off-ramps. **Phone-invite receipts** (with Twilio) help people receive funds even if they are new to Telegram.
+500 million migrant workers pay $40 billion in fees every year just to send money home.
+Western Union charges 5%. PayPal freezes accounts. Bank wires take 5 days.
+Setting up a crypto wallet requires seed phrases most people don't understand.
+
+## The Solution
+
+Open Telegram. Type "Send $50 to Mom". Done in 2 seconds. Fee: $0.05.
+
+SendFlow is an AI agent that makes sending USDC on Solana as simple as sending a text message.
+**No wallet setup. No seed phrases. No bank account needed.**
+
+## Quick Start
+
+1. Open [@SendFlowSol_bot](https://t.me/SendFlowSol_bot) on Telegram
+2. SendFlow creates your wallet instantly
+3. Add USDC via the **P2P marketplace** (or a friend / exchange)
+4. Type what you want to do
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Agent Framework | ElizaOS v2 |
+| LLM | Qwen 3.5 9B on Nosana GPU |
+| Blockchain | Solana mainnet |
+| Swaps | Jupiter v6 |
+| Price feeds | Pyth Network |
+| Compute | Nosana decentralized GPU |
+| Interface | Telegram Bot API |
 
 ## Who it's for
 
@@ -17,13 +48,45 @@ Open **Telegram**. Type **“Send $50 to Mom”** or **“Charge my customer 50 
 ## How it works
 
 1. Open `@SendFlowSol_bot` on Telegram.
-2. SendFlow creates your wallet and offers **fund** buttons (card on-ramp).
+2. SendFlow creates your wallet and **P2P fund** buttons (buy/sell USDC with locals — escrow on Solana, **zero platform fee**).
 3. Type the amount and recipient (`.sol`, address, contact, or **phone invite** flow).
 4. Confirm — settlement in seconds; **fee comparison**, **streaks**, **referrals**, and **30s undo** (custodial) where applicable.
 
-## Technical stack (overview)
+Five ElizaOS plugins (intent-parser, rate-checker, usdc-handler, payout-router, notifier), `GET /health` + `/metrics`, and **40+** product features — see the command reference below. Run `cd sendflow-agent && bun test` for integration tests.
 
-**ElizaOS v2**, **Qwen** on **Nosana**, five plugins (intent-parser, rate-checker, usdc-handler, payout-router, notifier), **Jupiter v6**, **Pyth**, encrypted custodial keys, `GET /health` + `/metrics`, growth loops, and **40+** product features — see the command reference below. Run `cd sendflow-agent && bun test` for integration tests.
+## P2P USDC marketplace
+
+SendFlow includes a built-in **peer-to-peer marketplace** where users buy and sell USDC from each other — **no platform fee** (only Solana network fees).
+
+### For buyers (want USDC, have cash)
+
+Type **“Buy 50 USDC”** → see sellers → pay via UPI, bank, GCash, M-Pesa, etc. → seller releases USDC from escrow → done.
+
+### For sellers (have USDC, want cash)
+
+Type **“Sell 100 USDC”** → set your rate → USDC moves to escrow → buyer sends fiat → you confirm → USDC is released to the buyer → done.
+
+### Supported payment methods
+
+UPI (India), GCash (Philippines), M-Pesa (Kenya/Africa), bank transfer, PayPal, Wise, cash in person.
+
+### Why zero platform fees
+
+There is no intermediary taking a spread — peers trade directly. SendFlow coordinates the trade and holds USDC in escrow during settlement.
+
+### Safety
+
+- USDC in escrow for sells before the offer is live  
+- Reputation and simple limits for new accounts  
+- Disputes: admin can **release to buyer** or **return to seller** (`/admin resolve <tradeId> buyer|seller`)
+
+### Flow details
+
+- **Partial fills**: buy less than the seller’s full line; the rest of the offer stays listed until sold or cancelled. Say **“bump my offer”** to move your listing to the top.
+- **Payment proof**: after **“I have paid”**, buyers can upload a fiat screenshot; it is stored and shared with the seller and is available when an admin resolves a dispute.
+- **Rates**: FX from ExchangeRate API + Jupiter USDC reference with cached fallbacks; warns if USDC drifts from the dollar peg.
+- **Volume caps**: per-user tier daily limits persisted under `data/` (`p2p-daily-volume.json`).
+- **Admin Telegram**: `/admin p2p stats`, `/admin p2p disputes`, `/admin p2p freeze <userId>`, `/admin p2p trades <userId>`.
 
 ### Security & persistence
 
@@ -58,17 +121,38 @@ cp .env.example .env
 bun run start
 ```
 
-## Deploy on Nosana (example)
-
-Build and push your Docker image, then post a Nosana job (market id from [Nosana docs](https://docs.nosana.com/)):
+## Docker (local)
 
 ```bash
-docker build -t yourname/sendflow:latest .
-docker push yourname/sendflow:latest
-nosana job post --image yourname/sendflow:latest --market <MARKET_ADDRESS> --wait
+docker build -t sendflow:latest .
+docker run --env-file sendflow-agent/.env -p 3000:3000 sendflow:latest
+curl -s http://localhost:3000/health | jq .
 ```
 
-For local CLI install and job JSON workflows, see [Nosana CLI](https://github.com/nosana-ci/nosana-cli) and [Create deployments](https://learn.nosana.com/api/create-deployments.html).
+`GET /health` returns JSON including `status`, `uptime`, `solanaConnected`, optional `escrowBalance` / `ollamaConnected`, and a **`p2p`** object (open offers, active trades, completed today, volume, disputes) when the agent is running.
+
+## Deploy on Nosana (example)
+
+Build and push your Docker image, then post a Nosana job (Builders market example):
+
+```bash
+docker build -t sendflow:latest .
+docker tag sendflow:latest YOUR_DOCKERHUB_USERNAME/sendflow:latest
+docker push YOUR_DOCKERHUB_USERNAME/sendflow:latest
+nosana job post \
+  --image YOUR_DOCKERHUB_USERNAME/sendflow:latest \
+  --market 7AtiXMSH6R1jjBxrcYjehCkkSF7zvYWte63gwEDBcGHq \
+  --wait
+```
+
+Set the job URL in `.env` after deploy:
+
+```env
+WEBAPP_PUBLIC_URL=https://YOUR_NODE.node.k8s.prd.nos.ci
+SENDFLOW_BASE_URL=https://YOUR_NODE.node.k8s.prd.nos.ci
+```
+
+For CLI install and workflows, see [Nosana CLI](https://github.com/nosana-ci/nosana-cli) and [Create deployments](https://learn.nosana.com/api/create-deployments.html).
 
 ## Environment variables
 
@@ -94,7 +178,14 @@ For local CLI install and job JSON workflows, see [Nosana CLI](https://github.co
 | `HELIUS_RPC_URL` | Optional Helius RPC for faster websockets |
 | `WALLET_ENCRYPTION_KEY` | AES-256 key for custodial wallet encryption |
 | `WHISPER_ENDPOINT` | Whisper ASR endpoint for voice transcription |
-| `MOONPAY_URL` | Fiat on-ramp URL for MoonPay |
+| `P2P_MAX_TRADE_NEW_USER` / `P2P_MAX_DAY_NEW_USER` | Per-trade and daily USDC caps for new traders |
+| `P2P_MAX_TRADE_REGULAR` / `P2P_MAX_DAY_REGULAR` | Caps after reputation builds |
+| `P2P_MAX_TRADE_TRUSTED` / `P2P_MAX_DAY_TRUSTED` | Higher caps for trusted traders |
+| `P2P_MAX_TRADE_VERIFIED` / `P2P_MAX_DAY_VERIFIED` | Optional verified tier |
+| `P2P_OFFER_EXPIRY_HOURS` | Listing TTL (default `24`) |
+| `P2P_TRADE_TIMEOUT_MINUTES` | Auto-dispute if seller does not act after buyer marked paid |
+| `P2P_MIN_TRADE_USDC` | Minimum trade size |
+| `MOONPAY_URL` | Optional legacy URL helper in `offrampOracle` tests |
 | `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM_NUMBER` | Optional SMS for phone claim invites |
 | `BIRDEYE_API_KEY` | Birdeye API key (trending tokens) |
 | `DEFI_LLAMA_URL` | DeFiLlama yields API |

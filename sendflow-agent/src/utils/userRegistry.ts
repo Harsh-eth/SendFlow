@@ -87,7 +87,7 @@ I just created your personal wallet:
 
 <b>To get started, fund your wallet:</b>
 1. Ask a friend to send USDC to your wallet above
-2. Buy USDC with your debit card (tap <b>Buy via MoonPay</b> or <b>Transak</b> below)
+2. Use the <b>P2P marketplace</b> (tap <b>Buy USDC</b>) — buy from locals with UPI, bank, GCash, M-Pesa; USDC stays in escrow until release
 3. Withdraw USDC from any exchange to your wallet
 
 <b>Then just type what you want to do:</b>
@@ -111,8 +111,8 @@ export const HELP_MESSAGE = [
   `<code>/c</code> contacts · <code>/m</code> market · <code>/l</code> leaderboard`,
   `<code>/r</code> referral · <code>/streak</code> · <code>/earn</code>`,
   ``,
-  `<b>Add / cash out</b>`,
-  `• Say <code>add money</code>, <code>buy USDC</code>, or <code>cash out</code>`,
+  `<b>P2P add / cash out</b>`,
+  `• <code>buy USDC</code> / <code>sell USDC</code> / <code>show offers</code> — peer-to-peer, escrow on Solana`,
   ``,
   `<b>💸 Send &amp; get paid</b>`,
   `• <code>Send $50 to Mom</code> or <code>Send 10 USDC to raj.sol</code>`,

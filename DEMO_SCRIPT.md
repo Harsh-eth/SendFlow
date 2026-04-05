@@ -1,31 +1,34 @@
 # SendFlow Demo Video Script (60 seconds)
 
-0:00-0:05 — Title card: "SendFlow — Send USDC anywhere. Just ask."
+0:00-0:05 — Title: "SendFlow — Send Money Anywhere. Zero Fees."
 
-0:05-0:12 — Show Telegram. Type: "Send 1 USDC to raj.sol"
-            Bot replies with rate preview + confirm button
+0:05-0:15 — Show Ahmed's phone (Telegram)
+            Type: "Sell 100 USDC for INR"
+            Bot shows rate keyboard — tap ₹83.40
+            Bot shows: "USDC locked in escrow. Offer posted."
 
-0:12-0:18 — Tap "Confirm". Show live transaction tracker editing in place.
-            0/32 → 32/32 confirmations. Bot sends success with Solscan link.
+0:15-0:25 — Switch to second phone (buyer)
+            Type: "Buy 50 USDC with INR"
+            Bot shows Ahmed's offer with reputation
+            Tap [Trade with Ahmed]
+            Bot shows: "Pay ₹4,170 to UPI: ahmed@okaxis"
 
-0:18-0:24 — Type: "Split 30 USDC between @mike and @sara"
-            Show group bill split with pay buttons for each person.
+0:25-0:35 — Back to buyer phone
+            Tap [I have paid]
+            Upload payment screenshot
+            Ahmed gets notification on his phone
 
-0:24-0:30 — Type: "Stake 50 USDC for 30 days"
-            Show stake preview with 10% APY. Tap confirm.
+0:35-0:45 — Ahmed's phone
+            Tap [✅ Release USDC]
+            Both phones show: "Trade complete!"
+            Buyer shows: 50 USDC in wallet
+            Solscan link visible
 
-0:30-0:36 — Type: "My card"
-            Show beautiful dark PNG status card sent as photo.
+0:45-0:55 — Buyer phone
+            Type: "Send 50 USDC to my sister in Philippines"
+            Bot: rate preview → YES → sent in 2 seconds
+            Solscan link
 
-0:36-0:42 — Say out loud: "Send 5 USDC to Mom" (voice message)
-            Bot transcribes: "Heard: Send 5 USDC to Mom — processing..."
-            Shows rate preview.
-
-0:42-0:48 — Type: "Show leaderboard"
-            Show top senders with badges and volume.
-
-0:48-0:55 — Type: "/admin demo"
-            Show auto-demo running through all features.
-
-0:55-1:00 — Title card: "42 features. Built on ElizaOS + Nosana + Solana."
-            "github.com/YOUR_USERNAME/sendflow"
+0:55-1:00 — Title: "Cash → USDC → Send → USDC → Cash"
+            "Zero platform fees. Built on Solana + Nosana."
+            GitHub URL

@@ -3,6 +3,7 @@ import {
   AgentRuntime,
   InMemoryDatabaseAdapter,
   ModelType,
+  createUniqueUuid,
   type ActionResult,
   type IAgentRuntime,
   type Memory,
@@ -307,6 +308,18 @@ import { rememberUserLocale, getUserLocale } from "./utils/countryDetector";
 import { formatCompetitorBlock, formatLocalizedWuLine, recordTransferSavings } from "./utils/costComparison";
 import { formatOnRampReply, getOnRampKeyboard } from "./utils/onRamp";
 import { formatOffRampReply, getOffRampKeyboard } from "./utils/offRamp";
+import { touchP2pActivity, listNonTerminalTrades, getP2pHealthSnapshot } from "./utils/p2pMarket";
+import { getP2PMarketSummaryHtml } from "./utils/p2pMarketSummary";
+import { rememberTelegramChat } from "./utils/telegramChatRegistry";
+import {
+  tryP2PWizardText,
+  tryP2PNaturalLanguage,
+  handleP2PCallback,
+  registerP2PIntervals,
+  tryP2PAdminResolveCommand,
+  tryP2PAdminExtendedCommands,
+  handleP2pPhotoProof,
+} from "./utils/p2pFlow";
 import { createPendingReceipt, getReceiptById, claimReceipt, expireOldReceipts } from "./utils/recipientOnboarding";
 import { createGoal, getGoals, getProgress, depositToGoal, setAutoSavePercent } from "./utils/savingsGoal";
 import {
@@ -1464,6 +1477,37 @@ const sendTgWithKeyboard = async (chatId: string, text: string, keyboard: Inline
   return null;
 };
 
+const p2pFlowCtx = (): import("./utils/p2pFlow").P2PFlowCtx => ({
+  connection,
+  sendTgHtml,
+  sendTgWithKeyboard,
+  adminTelegramId: process.env.ADMIN_TELEGRAM_ID?.trim(),
+  sendTgPhotoByFileId: async (chatId, fileId, caption) => {
+    if (!botToken) return;
+    await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, photo: fileId, caption, parse_mode: "HTML" }),
+    });
+  },
+  sendTgEditHtml: async (chatId, messageId, text) => {
+    if (!botToken) return;
+    await fetch(`https://api.telegram.org/bot${botToken}/editMessageText`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId, text, parse_mode: "HTML" }),
+    });
+  },
+  forwardTelegramMessage: async (toChatId, fromChatId, messageId) => {
+    if (!botToken) return;
+    await fetch(`https://api.telegram.org/bot${botToken}/forwardMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: toChatId, from_chat_id: fromChatId, message_id: messageId }),
+    });
+  },
+});
+
 const sendTgPhoto = async (chatId: string, photoBuffer: Buffer, caption: string): Promise<void> => {
   if (!botToken) return;
   try {
@@ -1632,8 +1676,10 @@ parseRemittanceIntentAction.handler = async (rt, msg, state, opts, cb) => {
   const userText = (msg.content.text ?? "").trim();
   const lower = userText.toLowerCase();
   try {
+  if (chatId) rememberTelegramChat(entityId, String(chatId));
   if (chatId) await sendTypingAction(String(chatId));
   void recordUserMessage(entityId).catch(() => {});
+  touchP2pActivity(entityId);
 
   if (isPermanentlyBlocked(entityId)) {
     if (chatId) await sendTgHtml(String(chatId), "⛔ <b>Access denied.</b>");
@@ -1648,6 +1694,31 @@ parseRemittanceIntentAction.handler = async (rt, msg, state, opts, cb) => {
       );
     }
     return { success: false, text: "rate limit" };
+  }
+
+  if (chatId) {
+    const p2pCtx = p2pFlowCtx();
+    const tgMeta = msg.metadata as { telegram?: { from?: { username?: string; first_name?: string } } } | undefined;
+    const adminTg = process.env.ADMIN_TELEGRAM_ID?.trim();
+    const isP2pAdmin = Boolean(adminTg && entityId === createUniqueUuid(runtime, adminTg));
+    const attachments = (msg.content as { attachments?: { id?: string; source?: string }[] }).attachments;
+    const imageAtt = attachments?.find((a) => a.source === "Image" && a.id);
+    if (imageAtt?.id) {
+      if (await handleP2pPhotoProof(entityId, String(chatId), imageAtt.id, undefined, p2pCtx)) {
+        return { success: true, text: "p2p_proof_photo" };
+      }
+    }
+    if (isP2pAdmin) {
+      if (await tryP2PAdminExtendedCommands(userText, String(chatId), p2pCtx, true)) {
+        return { success: true, text: "p2p_admin_ext" };
+      }
+      if (await tryP2PAdminResolveCommand(userText, String(chatId), p2pCtx, true)) {
+        return { success: true, text: "p2p_admin_resolve" };
+      }
+    }
+    if (await tryP2PWizardText(entityId, String(chatId), userText, p2pCtx, tgMeta)) {
+      return { success: true, text: "p2p_wizard" };
+    }
   }
 
   if (/^\/freeze\b/i.test(userText)) {
@@ -1985,7 +2056,7 @@ parseRemittanceIntentAction.handler = async (rt, msg, state, opts, cb) => {
     return { success: true, text: "onramp" };
   }
 
-  if (/\b(cash out|withdraw to bank|off[\s-]?ramp|sell usdc|convert usdc to inr|send to my bank)\b/i.test(lower)) {
+  if (/\b(cash out|withdraw to bank|off[\s-]?ramp|convert usdc to inr|send to my bank)\b/i.test(lower)) {
     const vel = await recordOffRampVelocityAttempt(entityId);
     if (!vel.allowed) {
       if (chatId) {
@@ -2343,7 +2414,9 @@ parseRemittanceIntentAction.handler = async (rt, msg, state, opts, cb) => {
   }
 
   if (/^\/?(help|\?)$/i.test(lower) || (/^\/start$/i.test(lower))) {
-    if (chatId) await sendTgWithKeyboard(String(chatId), HELP_MESSAGE, helpKeyboard);
+    if (chatId) {
+      await sendTgWithKeyboard(String(chatId), `${HELP_MESSAGE}${getP2PMarketSummaryHtml()}`, helpKeyboard);
+    }
     return { success: true, text: "Help displayed" };
   }
 
@@ -3272,6 +3345,14 @@ parseRemittanceIntentAction.handler = async (rt, msg, state, opts, cb) => {
     return wrappedParseHandler(rt, fakeGroupMsg, state, opts, cb);
   }
 
+  if (chatId) {
+    const p2pCtx = p2pFlowCtx();
+    const tgMeta = msg.metadata as { telegram?: { from?: { username?: string; first_name?: string } } } | undefined;
+    if (await tryP2PNaturalLanguage(entityId, String(chatId), lower, userText, p2pCtx, tgMeta)) {
+      return { success: true, text: "p2p_nl" };
+    }
+  }
+
   if (await isFrozen(entityId)) {
     const looksLikeTransfer =
       /^\s*send\s+[\d$]/i.test(userText) ||
@@ -3351,14 +3432,21 @@ if (botToken) {
           const cbq = update.callback_query;
           if (!cbq?.data) continue;
           const cbChatId = cbq.message?.chat?.id ? String(cbq.message.chat.id) : null;
-          const cbUserId = cbq.from?.id ? String(cbq.from.id) : null;
-          if (!cbChatId || !cbUserId) continue;
+          const cbTgUserId = cbq.from?.id ? String(cbq.from.id) : null;
+          if (!cbChatId || !cbTgUserId) continue;
+
+          const cbEntityId = createUniqueUuid(runtime, cbTgUserId);
+          rememberTelegramChat(cbEntityId, cbChatId);
 
           await answerCbQuery(cbq.id);
 
           const cbData = cbq.data;
+          const p2pCtxPoll = p2pFlowCtx();
+          if (await handleP2PCallback(cbData, cbEntityId, cbChatId, p2pCtxPoll, cbTgUserId)) {
+            continue;
+          }
           if (cbData === "action_send") {
-            startWizard(cbUserId);
+            startWizard(cbEntityId);
             await sendTgWithKeyboard(cbChatId, `💸 <b>Step 1/3:</b> How much USDC to send?`, amountKeyboard());
           } else if (cbData === "action_balance") {
             await sendTgHtml(cbChatId, `Checking balance... type <code>balance</code>`);
@@ -3375,13 +3463,13 @@ if (botToken) {
           } else if (cbData === "action_stats") {
             await sendTgHtml(cbChatId, `Type <code>stats</code> to see your analytics.`);
           } else if (cbData === "action_referral") {
-            const link = generateReferralLink(cbUserId, botUsername);
+            const link = generateReferralLink(cbEntityId, botUsername ?? "SendFlowSol_bot");
             await sendTgHtml(cbChatId, `👥 Share: ${link}\n💡 Earn 0.1 USDC per referral!`);
           } else if (cbData === "copy_wallet") {
-            const w = await getCustodialWallet(cbUserId);
+            const w = await getCustodialWallet(cbEntityId);
             if (w) await sendTgHtml(cbChatId, `📋 <code>${w.publicKey}</code>\n\nTap the address above to copy.`);
           } else if (cbData === "share_qr") {
-            const w = await getCustodialWallet(cbUserId);
+            const w = await getCustodialWallet(cbEntityId);
             if (w) {
               const { shortWallet: sw2 } = await import("@sendflow/plugin-intent-parser");
               const qr = await generateWalletQR(w.publicKey);
@@ -3390,23 +3478,23 @@ if (botToken) {
           } else if (cbData.startsWith("wizard_amount_")) {
             const val = cbData.replace("wizard_amount_", "");
             if (val === "custom") {
-              updateWizard(cbUserId, { step: "custom_amount" });
+              updateWizard(cbEntityId, { step: "custom_amount" });
               await sendTgHtml(cbChatId, `💸 Type the amount in USDC (e.g. <code>42.5</code>):`);
             } else {
               const { listContacts: lc } = await import("@sendflow/plugin-intent-parser");
-              const contacts = lc(cbUserId);
-              updateWizard(cbUserId, { step: "recipient", amount: Number(val) });
+              const contacts = lc(cbEntityId);
+              updateWizard(cbEntityId, { step: "recipient", amount: Number(val) });
               await sendTgWithKeyboard(cbChatId, `👤 <b>Step 2/3:</b> Who to send <b>${val} USDC</b> to?`, contactsKeyboard(contacts));
             }
           } else if (cbData.startsWith("wizard_to_")) {
             const target = cbData.replace("wizard_to_", "");
             if (target === "custom") {
-              updateWizard(cbUserId, { step: "custom_recipient" });
+              updateWizard(cbEntityId, { step: "custom_recipient" });
               await sendTgHtml(cbChatId, `✍️ Type wallet address or .sol domain:`);
             } else {
-              const wiz = getWizard(cbUserId);
+              const wiz = getWizard(cbEntityId);
               if (wiz?.amount) {
-                clearWizard(cbUserId);
+                clearWizard(cbEntityId);
                 await sendTgHtml(cbChatId, `Processing: Send ${wiz.amount} USDC to ${target}...`);
               }
             }
@@ -3423,7 +3511,7 @@ if (botToken) {
             }
           } else if (cbData.startsWith("approve_ms_")) {
             const requestId = cbData.slice("approve_ms_".length);
-            const ok = approveTransfer(requestId, cbUserId);
+            const ok = approveTransfer(requestId, cbEntityId);
             const ex = getPendingExecution(requestId);
             if (ok && ex) {
               ex.approvedAt = new Date().toISOString();
@@ -3469,7 +3557,7 @@ if (botToken) {
             }
           } else if (cbData.startsWith("reject_ms_")) {
             const requestId = cbData.slice("reject_ms_".length);
-            const ok = rejectTransfer(requestId, cbUserId);
+            const ok = rejectTransfer(requestId, cbEntityId);
             const ex = getPendingExecution(requestId);
             if (ok && ex?.initiatorChatId) {
               await sendTgHtml(ex.initiatorChatId, `❌ Your transfer was rejected by your approver.`);
@@ -3487,7 +3575,7 @@ if (botToken) {
             const claimCode = cbData.slice("sf_phone_claim_".length);
             await executePhoneClaimPayout({
               runtime,
-              recipientUserId: cbUserId,
+              recipientUserId: cbEntityId,
               recipientChatId: cbChatId,
               claimCode,
               sendHtml: sendTgHtml,
@@ -3496,7 +3584,7 @@ if (botToken) {
             });
           } else if (cbData === "sf_onboard_send") {
             recordOnboardingFirstAction("send");
-            startWizard(cbUserId);
+            startWizard(cbEntityId);
             await sendTgWithKeyboard(cbChatId, `💸 <b>How much USDC?</b>`, amountKeyboard());
           } else if (cbData === "sf_onboard_request") {
             recordOnboardingFirstAction("request");
@@ -3506,40 +3594,40 @@ if (botToken) {
             );
           } else if (cbData === "sf_onboard_addfunds") {
             recordOnboardingFirstAction("addfunds");
-            const w = await getCustodialWallet(cbUserId);
+            const w = await getCustodialWallet(cbEntityId);
             if (w) {
               await sendTgWithKeyboard(
                 cbChatId,
-                formatOnRampReply(w.publicKey, getUserLocale(cbUserId).country),
+                formatOnRampReply(w.publicKey, getUserLocale(cbEntityId).country),
                 getOnRampKeyboard(w.publicKey)
               );
             } else await sendTgHtml(cbChatId, `Setting up wallet…`);
           } else if (cbData === "sf_onboard_wallet") {
             recordOnboardingFirstAction("wallet");
-            const w = await getCustodialWallet(cbUserId);
+            const w = await getCustodialWallet(cbEntityId);
             if (w) {
-              const bal = await getCustodialUsdcBalance(cbUserId);
+              const bal = await getCustodialUsdcBalance(cbEntityId);
               await sendTgHtml(
                 cbChatId,
                 [`<b>Your wallet</b>`, `Address: <code>${w.publicKey}</code>`, `USDC balance: <b>${bal.toFixed(2)}</b>`].join("\n")
               );
             } else await sendTgHtml(cbChatId, `Wallet not ready yet.`);
           } else if (cbData === "onboard_send") {
-            startWizard(cbUserId);
+            startWizard(cbEntityId);
             await sendTgWithKeyboard(cbChatId, `💸 <b>How much USDC?</b>`, amountKeyboard());
           } else if (cbData === "onboard_fund" || cbData === "onboard_fund_first") {
-            const w = await getCustodialWallet(cbUserId);
+            const w = await getCustodialWallet(cbEntityId);
             if (w) {
               await sendTgWithKeyboard(
                 cbChatId,
-                formatOnRampReply(w.publicKey, getUserLocale(cbUserId).country),
+                formatOnRampReply(w.publicKey, getUserLocale(cbEntityId).country),
                 getOnRampKeyboard(w.publicKey)
               );
             } else await sendTgHtml(cbChatId, `Setting up wallet…`);
           } else if (cbData === "onramp_skip") {
             await sendTgHtml(cbChatId, `Great — when you're ready, say <code>balance</code> or <code>Send $10 to Mom</code>.`);
           } else if (cbData === "onboard_how") {
-            advanceOnboarding(cbUserId);
+            advanceOnboarding(cbEntityId);
             await sendTgWithKeyboard(
               cbChatId,
               [
@@ -3553,7 +3641,7 @@ if (botToken) {
               ].join("\n"),
               onboardingDemoKeyboard()
             );
-            scheduleOnboardingReminder(cbUserId, cbChatId, async (html) => {
+            scheduleOnboardingReminder(cbEntityId, cbChatId, async (html) => {
               await sendTgHtml(cbChatId, html);
             });
           } else if (cbData === "onboard_demo") {
@@ -3562,7 +3650,7 @@ if (botToken) {
               `Type: <code>Send 1 USDC to raj.sol</code> (or any wallet / .sol name) — then confirm.`
             );
           } else if (cbData === "onboard_share") {
-            const link = generateReferralLink(cbUserId, botUsername ?? "SendFlowSol_bot");
+            const link = generateReferralLink(cbEntityId, botUsername ?? "SendFlowSol_bot");
             await sendTgHtml(cbChatId, `Share this link — friends get 3 fee-free txs:\n<code>${link}</code>`);
           } else if (cbData === "onboard_explore") {
             await sendTgWithKeyboard(cbChatId, HELP_MESSAGE, helpKeyboard);
@@ -3590,18 +3678,18 @@ if (botToken) {
             pruneExpiredBehavioralPending();
             const id = cbData.slice("beh_unusual_yes_".length);
             const taken = takeBehavioralPending(id);
-            if (!taken || taken.userId !== cbUserId || taken.expiresAt < Date.now()) {
+            if (!taken || taken.userId !== cbEntityId || taken.expiresAt < Date.now()) {
               behavioralResumeByPendingId.delete(id);
-              clearBehavioralWizardPending(cbUserId);
+              clearBehavioralWizardPending(cbEntityId);
               await sendTgHtml(cbChatId, `This confirmation expired. Start the transfer again.`);
             } else {
               const resume = behavioralResumeByPendingId.get(id);
               behavioralResumeByPendingId.delete(id);
-              clearBehavioralWizardPending(cbUserId);
+              clearBehavioralWizardPending(cbEntityId);
               if (!resume) {
                 await sendTgHtml(cbChatId, `Could not resume transfer. Try again.`);
               } else {
-                setProcessing(cbUserId);
+                setProcessing(cbEntityId);
                 try {
                   await continueTransferAfterRateLimit(
                     resume.rt,
@@ -3614,7 +3702,7 @@ if (botToken) {
                   );
                 } catch (e) {
                   const em = e instanceof Error ? e.message : String(e);
-                  log.error("behavioral.resume_failed", { cbUserId }, e instanceof Error ? e : new Error(em));
+                  log.error("behavioral.resume_failed", { cbEntityId }, e instanceof Error ? e : new Error(em));
                   await sendTgHtml(cbChatId, `❌ ${em}`);
                 }
               }
@@ -3623,16 +3711,16 @@ if (botToken) {
             const id = cbData.slice("beh_unusual_no_".length);
             takeBehavioralPending(id);
             behavioralResumeByPendingId.delete(id);
-            clearBehavioralWizardPending(cbUserId);
-            pinVerifiedForTransfer.delete(cbUserId);
-            clearProcessing(cbUserId);
+            clearBehavioralWizardPending(cbEntityId);
+            pinVerifiedForTransfer.delete(cbEntityId);
+            clearProcessing(cbEntityId);
             await sendTgHtml(cbChatId, `Cancelled. This unusual transfer was not sent.`);
           } else if (cbData === "confirm_yes") {
-            const stakeP = pendingStakePreview.get(cbUserId);
+            const stakeP = pendingStakePreview.get(cbEntityId);
             if (stakeP) {
-              pendingStakePreview.delete(cbUserId);
-              stakeUsdc(cbUserId, stakeP.amount, stakeP.lockDays);
-              const s = getStakePosition(cbUserId);
+              pendingStakePreview.delete(cbEntityId);
+              stakeUsdc(cbEntityId, stakeP.amount, stakeP.lockDays);
+              const s = getStakePosition(cbEntityId);
               const e = s ? calculateEarned(s) : 0;
               await sendTgWithKeyboard(
                 cbChatId,
@@ -3647,66 +3735,66 @@ if (botToken) {
               );
             }
           } else if (cbData === "confirm_no") {
-            pendingStakePreview.delete(cbUserId);
+            pendingStakePreview.delete(cbEntityId);
             await sendTgHtml(cbChatId, `Cancelled.`);
           } else if (cbData === "loan_accept") {
-            const loan = pendingLoanApp.get(cbUserId);
+            const loan = pendingLoanApp.get(cbEntityId);
             if (loan && escrow) {
               try {
                 const sig = await disburseLoan(loan.loanId, escrow, connection);
-                pendingLoanApp.delete(cbUserId);
+                pendingLoanApp.delete(cbEntityId);
                 await sendTgHtml(cbChatId, `✅ Loan disbursed.\n🔗 <a href="https://solscan.io/tx/${sig}">Solscan</a>`);
               } catch (e) {
                 const em = e instanceof Error ? e.message : String(e);
-                log.error("loan.disburse_failed", { cbUserId }, e instanceof Error ? e : new Error(em));
+                log.error("loan.disburse_failed", { cbEntityId }, e instanceof Error ? e : new Error(em));
                 await sendTgHtml(cbChatId, `❌ <b>Something went wrong</b>\n${em}\n💡 Try again or type <b>help</b>`);
               }
             } else {
               await sendTgHtml(cbChatId, `No pending loan or escrow not configured.`);
             }
           } else if (cbData === "loan_decline") {
-            const loan = pendingLoanApp.get(cbUserId);
-            if (loan) pendingLoanApp.delete(cbUserId);
+            const loan = pendingLoanApp.get(cbEntityId);
+            if (loan) pendingLoanApp.delete(cbEntityId);
             await sendTgHtml(cbChatId, `Okay — loan offer dismissed.`);
           } else if (cbData === "stream_pause") {
-            const st = pauseStream(cbUserId);
+            const st = pauseStream(cbEntityId);
             await sendTgHtml(cbChatId, st ? `Stream <b>paused</b>.` : `No active stream.`);
           } else if (cbData === "stream_stop") {
-            const st = getStreamStatus(cbUserId);
+            const st = getStreamStatus(cbEntityId);
             if (st && escrow) {
               try {
-                await settleStream(cbUserId, escrow, connection);
-                endStream(cbUserId);
+                await settleStream(cbEntityId, escrow, connection);
+                endStream(cbEntityId);
                 await sendTgHtml(cbChatId, `Stream stopped and settled.`);
               } catch (e) {
                 const em = e instanceof Error ? e.message : String(e);
-                log.error("stream.stop_failed", { cbUserId }, e instanceof Error ? e : new Error(em));
+                log.error("stream.stop_failed", { cbEntityId }, e instanceof Error ? e : new Error(em));
                 await sendTgHtml(cbChatId, `❌ <b>Something went wrong</b>\n${em}`);
               }
             } else {
               await sendTgHtml(cbChatId, `No active stream or escrow missing.`);
             }
           } else if (cbData === "pos_sales") {
-            const s = getPOSSession(cbUserId);
-            const summary = s ? getDailySummary(cbUserId) : `No POS session.`;
+            const s = getPOSSession(cbEntityId);
+            const summary = s ? getDailySummary(cbEntityId) : `No POS session.`;
             await sendTgHtml(cbChatId, typeof summary === "string" ? summary : String(summary));
           } else if (cbData === "pos_disable") {
-            disablePOS(cbUserId);
+            disablePOS(cbEntityId);
             await sendTgHtml(cbChatId, `POS mode disabled.`);
           } else if (cbData.startsWith("vote_yes_")) {
             const pid = cbData.slice("vote_yes_".length);
             const tid = findTreasuryIdByProposalId(pid);
             if (tid) {
-              voteOnProposal(tid, pid, cbUserId, "yes");
-              recordDaoVote(cbUserId);
+              voteOnProposal(tid, pid, cbEntityId, "yes");
+              recordDaoVote(cbEntityId);
               await sendTgHtml(cbChatId, `Recorded <b>YES</b> on <code>${pid}</code>.`);
             } else await sendTgHtml(cbChatId, `Proposal not found.`);
           } else if (cbData.startsWith("vote_no_")) {
             const pid = cbData.slice("vote_no_".length);
             const tid = findTreasuryIdByProposalId(pid);
             if (tid) {
-              voteOnProposal(tid, pid, cbUserId, "no");
-              recordDaoVote(cbUserId);
+              voteOnProposal(tid, pid, cbEntityId, "no");
+              recordDaoVote(cbEntityId);
               await sendTgHtml(cbChatId, `Recorded <b>NO</b> on <code>${pid}</code>.`);
             } else await sendTgHtml(cbChatId, `Proposal not found.`);
           } else if (cbData.startsWith("execute_proposal_")) {
@@ -3718,7 +3806,7 @@ if (botToken) {
                 await sendTgHtml(cbChatId, `✅ Executed.\n🔗 <a href="https://solscan.io/tx/${sig}">Solscan</a>`);
               } catch (e) {
                 const em = e instanceof Error ? e.message : String(e);
-                log.error("treasury.execute_failed", { cbUserId, pid }, e instanceof Error ? e : new Error(em));
+                log.error("treasury.execute_failed", { cbEntityId, pid }, e instanceof Error ? e : new Error(em));
                 await sendTgHtml(cbChatId, `❌ ${em}`);
               }
             } else {
@@ -3732,12 +3820,12 @@ if (botToken) {
             const u = cbData.slice("send_to_".length);
             await sendTgHtml(cbChatId, `Say: <code>Send 10 USDC to @${u}</code> (change the amount as needed).`);
           } else if (cbData === "swap_confirm") {
-            const amt = pendingSwapAmount.get(cbUserId);
-            const w = await getCustodialWallet(cbUserId);
+            const amt = pendingSwapAmount.get(cbEntityId);
+            const w = await getCustodialWallet(cbEntityId);
             if (amt && w) {
               try {
-                const sig = await executeSwap(cbUserId, USDC_MAINNET, SOL_MINT, amt, 6, 50, connection);
-                pendingSwapAmount.delete(cbUserId);
+                const sig = await executeSwap(cbEntityId, USDC_MAINNET, SOL_MINT, amt, 6, 50, connection);
+                pendingSwapAmount.delete(cbEntityId);
                 if (sig) {
                   await sendTgHtml(cbChatId, `✅ Swap submitted.\n🔗 <a href="https://solscan.io/tx/${sig}">Solscan</a>`);
                 } else {
@@ -3745,30 +3833,30 @@ if (botToken) {
                 }
               } catch (e) {
                 const em = e instanceof Error ? e.message : String(e);
-                log.error("swap.confirm_failed", { cbUserId }, e instanceof Error ? e : new Error(em));
+                log.error("swap.confirm_failed", { cbEntityId }, e instanceof Error ? e : new Error(em));
                 await sendTgHtml(cbChatId, `❌ ${em}`);
               }
             } else {
               await sendTgHtml(cbChatId, `No pending swap or wallet missing. Say <code>swap 10 USDC to SOL</code>.`);
             }
           } else if (cbData === "swap_cancel") {
-            pendingSwapAmount.delete(cbUserId);
+            pendingSwapAmount.delete(cbEntityId);
             await sendTgHtml(cbChatId, `Swap cancelled.`);
           } else if (cbData === "vault_deposit") {
             await sendTgHtml(cbChatId, `Type: <code>deposit 50 USDC to savings</code> (or similar).`);
           } else if (cbData === "vault_withdraw") {
-            const pos = getVaultPosition(cbUserId);
+            const pos = getVaultPosition(cbEntityId);
             if (!pos) {
               await sendTgHtml(cbChatId, `No vault deposit.`);
             } else {
-              const out = await withdrawFromVault(cbUserId);
+              const out = await withdrawFromVault(cbEntityId);
               await sendTgHtml(
                 cbChatId,
                 out ? `✅ Withdrawn (recorded). You had <b>${out.depositedAmount} USDC</b> in ${out.protocol}.` : `Nothing to withdraw.`
               );
             }
           } else if (cbData === "vault_earnings") {
-            const pos = getVaultPosition(cbUserId);
+            const pos = getVaultPosition(cbEntityId);
             if (!pos) await sendTgHtml(cbChatId, `No vault deposit.`);
             else {
               const { daily, monthly } = calculateEarnings(pos);
@@ -3796,67 +3884,67 @@ if (botToken) {
             const lines = top.map((e, i) => `${i + 1}. ${e.displayName} — ${e.totalSent.toFixed(2)} USDC`);
             await sendTgWithKeyboard(cbChatId, (lines.length ? [`<b>Top senders</b>`, ...lines] : [`No entries yet.`]).join("\n"), leaderboardKeyboard);
           } else if (cbData === "action_card") {
-            const bal = await getCustodialUsdcBalance(cbUserId);
-            const txs = sharedGetAllTransfers(cbUserId);
+            const bal = await getCustodialUsdcBalance(cbEntityId);
+            const txs = sharedGetAllTransfers(cbEntityId);
             const totalSent = txs.reduce((s, t) => s + (t.amount ?? 0), 0);
-            const prof = getProfile(cbUserId);
+            const prof = getProfile(cbEntityId);
             const totalReceived = prof?.totalReceived ?? 0;
-            const score = calculateCreditScore(cbUserId);
+            const score = calculateCreditScore(cbEntityId);
             try {
-              const png = await generateStatusCard(cbUserId, bal, totalSent, totalReceived, score, prof?.username);
+              const png = await generateStatusCard(cbEntityId, bal, totalSent, totalReceived, score, prof?.username);
               await sendTgPhoto(cbChatId, png, `Your SendFlow status card`);
             } catch (e) {
               await sendTgHtml(cbChatId, `Could not render card: ${e instanceof Error ? e.message : String(e)}`);
             }
           } else if (cbData === "key_export_confirm") {
-            const wallet = await getCustodialWallet(cbUserId);
+            const wallet = await getCustodialWallet(cbEntityId);
             if (!wallet) {
               await sendTgHtml(cbChatId, `No wallet.`);
-            } else if (!(await hasPin(cbUserId))) {
+            } else if (!(await hasPin(cbEntityId))) {
               await sendTgHtml(
                 cbChatId,
                 `🔐 Set a PIN first: <code>/setpin 123456</code> — then use Export again.`
               );
             } else {
-              exportPinAwaiting.add(cbUserId);
+              exportPinAwaiting.add(cbEntityId);
               await sendTgHtml(
                 cbChatId,
                 `⚠️ <b>Export private key</b>\n\n🔐 Enter your <b>6-digit PIN</b> in chat to start a 60s countdown before the key is sent.`
               );
             }
           } else if (cbData === "key_export_cancel") {
-            exportPinAwaiting.delete(cbUserId);
+            exportPinAwaiting.delete(cbEntityId);
             await sendTgHtml(cbChatId, `Export cancelled.`);
           } else if (cbData === "leaderboard_join") {
             const from = cbq.from as { id: number; username?: string; first_name?: string } | undefined;
             const name = from?.username ? `@${from.username}` : from?.first_name ?? "User";
-            await joinLeaderboard(cbUserId, name);
+            await joinLeaderboard(cbEntityId, name);
             await sendTgHtml(cbChatId, `You joined the leaderboard.`);
           } else if (cbData === "leaderboard_rank") {
-            const r = await getUserRank(cbUserId);
+            const r = await getUserRank(cbEntityId);
             await sendTgHtml(cbChatId, r < 0 ? `Not ranked yet.` : `Your rank: <b>#${r}</b>`);
           } else if (cbData.startsWith("stake_")) {
             const tier = cbData.replace("stake_", "");
             if (tier === "cancel") {
-              pendingStakeAmount.delete(cbUserId);
-              pendingStakePreview.delete(cbUserId);
+              pendingStakeAmount.delete(cbEntityId);
+              pendingStakePreview.delete(cbEntityId);
               await sendTgHtml(cbChatId, `Stake flow cancelled.`);
             } else if (tier === "withdraw") {
-              const s = getStakePosition(cbUserId);
+              const s = getStakePosition(cbEntityId);
               if (!s || !escrow) {
                 await sendTgHtml(cbChatId, `No stake or escrow.`);
               } else if (!isMatured(s)) {
                 await sendTgHtml(cbChatId, `Still locked until <b>${new Date(s.maturesAt).toLocaleString()}</b>.`);
               } else {
                 try {
-                  const sig = await withdrawStake(cbUserId, escrow, connection);
+                  const sig = await withdrawStake(cbEntityId, escrow, connection);
                   await sendTgHtml(cbChatId, `✅ Withdrawn. <code>${sig.slice(0, 10)}…</code>`);
                 } catch (e) {
                   await sendTgHtml(cbChatId, `❌ ${e instanceof Error ? e.message : String(e)}`);
                 }
               }
             } else if (tier === "earnings") {
-              const s = getStakePosition(cbUserId);
+              const s = getStakePosition(cbEntityId);
               if (!s) await sendTgHtml(cbChatId, `No active stake.`);
               else {
                 const e = calculateEarned(s);
@@ -3869,7 +3957,7 @@ if (botToken) {
             }
           } else if (cbData.startsWith("split_pay_")) {
             const sid = cbData.slice("split_pay_".length);
-            const ok = recordPayment(sid, cbUserId);
+            const ok = recordPayment(sid, cbEntityId);
             const sp = getSplitStatus(sid);
             if (ok && sp) {
               await sendTgHtml(cbChatId, `✅ Recorded your payment.`);
@@ -3885,16 +3973,16 @@ if (botToken) {
             }
           } else if (cbData.startsWith("rollback_dismiss_")) {
             const uid = cbData.slice("rollback_dismiss_".length);
-            if (uid === cbUserId) expireRollback(cbUserId);
+            if (uid === cbEntityId) expireRollback(cbEntityId);
           } else if (cbData.startsWith("rollback_") && !cbData.startsWith("rollback_dismiss_")) {
             const uid = cbData.slice("rollback_".length);
-            if (uid !== cbUserId) {
+            if (uid !== cbEntityId) {
               await sendTgHtml(cbChatId, `Not your rollback.`);
             } else if (!escrow) {
               await sendTgHtml(cbChatId, `Escrow not configured.`);
             } else {
               try {
-                const sig = await executeRollback(cbUserId, escrow, connection);
+                const sig = await executeRollback(cbEntityId, escrow, connection);
                 await sendTgHtml(cbChatId, `↩ Undo sent.\n🔗 <a href="https://solscan.io/tx/${sig}">Solscan</a>`);
               } catch (e) {
                 const em = e instanceof Error ? e.message : String(e);
@@ -3914,7 +4002,7 @@ if (botToken) {
           } else if (cbData === "settings_budget") {
             await sendTgHtml(cbChatId, `💰 Type: <code>Set my monthly budget to 500 USDC</code>`);
           } else if (cbData === "settings_digest") {
-            const enabled = isDigestEnabled(cbUserId);
+            const enabled = isDigestEnabled(cbEntityId);
             await sendTgHtml(cbChatId, enabled ? `Type <code>stop daily digest</code> to disable.` : `Type <code>send me daily updates</code> to enable.`);
           } else if (cbData === "settings_business") {
             await sendTgHtml(cbChatId, `Type <code>enable business mode</code> to unlock business features.`);
@@ -4069,6 +4157,7 @@ const healthServer = startHealthServer({
     return (await connection.getBalance(escrow.publicKey)) / 1e9;
   },
   ollamaOk: () => llmHealthy,
+  getP2pSnapshot: () => getP2pHealthSnapshot(),
 });
 
 const webappUrl = process.env.WEBAPP_PUBLIC_URL?.trim();
@@ -4115,6 +4204,8 @@ if (adminId && botToken) {
     `🌐 Health: <code>http://localhost:${process.env.PORT ?? 3000}/health</code>`,
   ].join("\n"));
 }
+
+registerP2PIntervals(connection, sendTgHtml, process.env.ADMIN_TELEGRAM_ID?.trim());
 
 log.info("startup.complete", {
   features: {
@@ -4470,6 +4561,20 @@ process.on("SIGTERM", async () => {
   logger.info("SIGTERM: graceful shutdown");
   const ints = (globalThis as { __sendflowIntervals?: ReturnType<typeof setInterval>[] }).__sendflowIntervals;
   if (ints) for (const id of ints) clearInterval(id);
+  try {
+    const { resolveTelegramChatId } = await import("./utils/telegramChatRegistry");
+    const restartMsg =
+      "⚠️ <b>SendFlow is restarting</b>\nYour active trade is safe. USDC remains in escrow. The bot will be back in ~30 seconds.";
+    for (const t of listNonTerminalTrades()) {
+      if (t.status !== "matched" && t.status !== "escrow") continue;
+      const bc = resolveTelegramChatId(t.buyerUserId);
+      const sc = resolveTelegramChatId(t.sellerUserId);
+      await sendTgHtml(bc, restartMsg).catch(() => {});
+      await sendTgHtml(sc, restartMsg).catch(() => {});
+    }
+  } catch {
+    /* non-fatal */
+  }
   try {
     await processRpcRetryQueue(runtime, connection, undefined, async (cid, text) => {
       await sendTgHtml(cid, text);

@@ -218,7 +218,7 @@ describeE2e("SendFlow E2E full security flow", () => {
           const r = await injectMessage("user_005", "I want to cash out to my bank");
           const t = r.replied.join("\n").toLowerCase();
           if (i < 5) {
-            if (!/cash out|moonpay|transak|bank/.test(t)) throw new Error("expected off-ramp copy");
+            if (!/cash out|p2p|sell usdc|bank|escrow/i.test(t)) throw new Error("expected off-ramp copy");
           } else if (t.includes("velocity_limit")) {
             sawVelocity = true;
           }

@@ -1,22 +1,24 @@
-Just shipped SendFlow for @nosana_ci x @elizaos builders challenge.
+Built a complete P2P money transfer system for the
+@nosana_ci x @elizaos builders challenge.
 
-Send USDC anywhere in the world. Just type it in Telegram.
+Ahmed in Dubai → sends money to Mom in Pakistan
+Total cost: $0.01
+Western Union cost: $10
 
-Built 42 features in 10 days:
-- Natural language transfers
-- .sol domain support
-- Voice message payments
-- DAO treasury management
-- Micro-loans with credit scoring
-- Streaming payments per second
-- AI weekly financial reports
-- Merchant POS mode
-- Solana Blinks integration
-- Gasless onboarding for new users
+How it works:
+1. Buy USDC from local seller (UPI/GCash/M-Pesa)
+2. Send USDC via Telegram natural language
+3. Recipient sells USDC to local buyer for cash
 
-All inference runs on @nosana_ci decentralized GPUs.
-Zero banks. Zero apps. Just Solana.
+Zero platform fees. Solana escrow = no trust needed.
 
+Built with:
+- @elizaos v2 agent framework
+- @nosana_ci GPU (Qwen 3.5 9B)
+- Solana web3.js + Jupiter v6
+- P2P escrow via SPL token program
+
+Live on Solana mainnet.
 github.com/YOUR_USERNAME/sendflow
 
-#Solana #ElizaOS #Nosana #BuildersChallenge #DeFi #Web3
+#Solana #ElizaOS #Nosana #BuildersChallenge #DeFi

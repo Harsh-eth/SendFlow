@@ -344,6 +344,71 @@ export async function executeRollbackRecipientTransfer(
   });
 }
 
+function loadEscrowKeypairFromEnv(): Keypair | null {
+  const s = process.env.SOLANA_ESCROW_WALLET_PRIVATE_KEY?.trim();
+  if (!s) return null;
+  try {
+    return Keypair.fromSecretKey(bs58.decode(s));
+  } catch {
+    try {
+      return Keypair.fromSecretKey(Uint8Array.from(JSON.parse(s) as number[]));
+    } catch {
+      return null;
+    }
+  }
+}
+
+/** Move USDC from user's custodial wallet into the escrow ATA (P2P sell offers). */
+export async function transferCustodialUsdcToEscrow(
+  userId: string,
+  connection: Connection,
+  amountHuman: number
+): Promise<string> {
+  const escrowKp = loadEscrowKeypairFromEnv();
+  if (!escrowKp) throw new Error("SOLANA_ESCROW_WALLET_PRIVATE_KEY not configured");
+  const mint = new PublicKey(process.env.USDC_MINT ?? "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+  const usdcMintStr = mint.toBase58();
+  const raw = BigInt(Math.round(amountHuman * 1_000_000));
+  if (raw <= 0n) throw new Error("Amount must be positive");
+  const wallet = await getCustodialWallet(userId);
+  if (!wallet) throw new Error("No custodial wallet");
+  const rw = await migrateWalletIfNeeded(wallet);
+  const allowed = buildAllowedPrograms(process.env.JUPITER_PROGRAM_ID?.trim() || DEFAULT_JUPITER);
+  return withInternalKeypair(rw, async (userKp) => {
+    const userAta = await getAssociatedTokenAddress(mint, userKp.publicKey);
+    const escrowAta = await getOrCreateAssociatedTokenAccount(connection, userKp, mint, escrowKp.publicKey);
+    const ix = createTransferInstruction(userAta, escrowAta.address, userKp.publicKey, raw);
+    const tx = new Transaction().add(ix);
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = userKp.publicKey;
+    tx.sign(userKp);
+    const sim = await simulateAndVerifyCore(
+      connection,
+      tx,
+      {
+        userWallet: userKp.publicKey.toBase58(),
+        intendedAmountUsdc: amountHuman,
+        intendedRecipient: escrowKp.publicKey.toBase58(),
+        usdcMint: usdcMintStr,
+        mode: "transfer",
+      },
+      allowed
+    );
+    if (!sim.safe) {
+      const txB64 = Buffer.from(tx.serialize()).toString("base64");
+      await notifyAdminBlockedTx({ userId, reason: sim.reason, txBase64: txB64 });
+      throw new Error(`Transaction blocked: ${sim.reason ?? "unknown"}`);
+    }
+    const sig58 = getFirstSignatureBase58(tx);
+    await assertSignatureNotReplay(userId, sig58);
+    const txid = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false, maxRetries: 3 });
+    await connection.confirmTransaction({ signature: txid, blockhash, lastValidBlockHeight }, "confirmed");
+    await recordSubmittedSignature(userId, sig58);
+    return txid;
+  });
+}
+
 export async function findUserIdByWalletAddress(address: string): Promise<string | null> {
   try {
     const dir = getWalletDir();
