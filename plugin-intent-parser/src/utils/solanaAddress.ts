@@ -1,10 +1,10 @@
 import { PublicKey } from "@solana/web3.js";
 
-/** Validates a base58 Solana address using on-curve check (per project rules). */
+/** Validates a base58 Solana address (any valid pubkey, on or off curve). */
 export function isValidReceiverWallet(address: string): boolean {
   try {
-    const pk = new PublicKey(address);
-    return PublicKey.isOnCurve(pk.toBytes());
+    new PublicKey(address);
+    return true;
   } catch {
     return false;
   }

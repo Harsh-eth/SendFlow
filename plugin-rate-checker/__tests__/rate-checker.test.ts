@@ -78,7 +78,7 @@ describe("plugin-rate-checker", () => {
         undefined
       );
       expect(res?.success).toBe(false);
-      expect(String(res?.text)).toContain("Could not fetch rate");
+      expect(String(res?.text)).toMatch(/Could not fetch|Rate unavailable/i);
     } finally {
       globalThis.fetch = orig;
     }

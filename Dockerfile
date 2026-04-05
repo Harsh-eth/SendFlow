@@ -1,8 +1,13 @@
-FROM node:20-alpine
+FROM oven/bun:1.2-alpine
 WORKDIR /app
 COPY . .
-RUN npm install -g bun
 RUN bun install
-RUN bun run build
+RUN cd plugin-intent-parser && bun run build \
+  && cd ../plugin-rate-checker && bun run build \
+  && cd ../plugin-usdc-handler && bun run build \
+  && cd ../plugin-payout-router && bun run build \
+  && cd ../plugin-notifier && bun run build \
+  && cd ../sendflow-agent && bun run build
 EXPOSE 3000
-CMD ["bun", "run", "sendflow-agent/src/index.ts"]
+WORKDIR /app/sendflow-agent
+CMD ["bun", "run", "src/index.ts"]

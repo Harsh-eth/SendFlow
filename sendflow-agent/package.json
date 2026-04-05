@@ -5,6 +5,9 @@
   "type": "module",
   "scripts": {
     "build": "tsc --noEmit -p tsconfig.json",
+    "gen:og": "bun run scripts/generateOgImage.ts",
+    "test": "bun test",
+    "test:e2e": "bun test tests/e2e/fullFlow.test.ts",
     "start": "bun --env-file=../../.env --env-file=.env run src/index.ts"
   },
   "dependencies": {
@@ -15,11 +18,18 @@
     "@sendflow/plugin-payout-router": "workspace:*",
     "@sendflow/plugin-rate-checker": "workspace:*",
     "@sendflow/plugin-usdc-handler": "workspace:*",
+    "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.98.4",
-    "bs58": "^6.0.0"
+    "bcryptjs": "^3.0.3",
+    "bs58": "^6.0.0",
+    "canvas": "^3.2.3",
+    "qrcode": "^1.5.4",
+    "telegraf": "4.16.3"
   },
   "devDependencies": {
+    "@types/bcryptjs": "^3.0.0",
     "@types/node": "^22.10.2",
+    "@types/qrcode": "^1.5.6",
     "typescript": "^5.8.3"
   }
 }

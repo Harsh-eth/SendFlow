@@ -6,8 +6,18 @@ import {
   Memory,
   State,
 } from "@elizaos/core";
-import type { RemittanceIntent } from "@sendflow/plugin-intent-parser";
-import { setPending } from "@sendflow/plugin-intent-parser";
+import {
+  type RemittanceIntent,
+  setPending,
+  shortWallet,
+  lookupToken,
+  tokenEmoji,
+  speedLabel,
+  estimatedExtraFee,
+  type SpeedMode,
+  loggerCompat as logger,
+  getSponsorshipMessage,
+} from "@sendflow/plugin-intent-parser";
 import type { SendflowRate } from "../types";
 import {
   computeRecipientGets,
@@ -24,7 +34,7 @@ function getEnv(runtime: IAgentRuntime, key: string): string {
 
 export const checkRemittanceRateAction: Action = {
   name: "CHECK_REMITTANCE_RATE",
-  similes: ["CHECK_RATE", "FETCH_RATE"],
+  similes: ["CHECK_RATE", "FETCH_RATE", "GET_RATE", "QUOTE_RATE", "PRICE_CHECK"],
   description:
     "Fetches Jupiter and Pyth USD prices, picks the better deal for the user, sets sendflow.rate.",
   validate: async (_runtime: IAgentRuntime, _message: Memory, state?: State) => {
@@ -39,10 +49,74 @@ export const checkRemittanceRateAction: Action = {
     _options?: unknown,
     callback?: HandlerCallback
   ): Promise<ActionResult> => {
-    const sf = state?.values?.sendflow as { intent?: RemittanceIntent } | undefined;
+    const sf = state?.values?.sendflow as { intent?: RemittanceIntent; speedMode?: SpeedMode } | undefined;
     const intent = sf?.intent as RemittanceIntent;
+    const speed: SpeedMode = (sf as any)?.speedMode ?? "normal";
+
+    const isSameToken = intent.sourceMint === intent.targetMint;
+    logger.info(`Rate check: sourceMint=${intent.sourceMint.slice(0,8)}… targetMint=${intent.targetMint.slice(0,8)}… sameToken=${isSameToken}`);
+    if (isSameToken) {
+      const sendflowFee = intent.amount * (FEE_BPS / 10_000);
+      const recipientGets = intent.amount - sendflowFee;
+      const rate: SendflowRate = {
+        sourceMint: intent.sourceMint,
+        targetMint: intent.targetMint,
+        jupiterRate: 1,
+        pythRate: 1,
+        bestRate: 1,
+        provider: "jupiter",
+        recipientGets,
+        sendflowFee,
+        fetchedAt: new Date().toISOString(),
+      };
+
+      const tokenInfo = lookupToken(intent.sourceMint);
+      const sym = tokenInfo?.symbol ?? "USDC";
+      const em = tokenEmoji(sym);
+      const speedLine = speed !== "normal" ? `\n${speedLabel(speed)} | Extra fee: ${estimatedExtraFee(speed)}` : "";
+      const sponsorLine = message.entityId ? getSponsorshipMessage(String(message.entityId)) : "";
+
+      const preview = `💱 <b>Transfer Preview</b>
+
+${em} Sending: <b>${intent.amount} ${sym}</b>
+👤 Recipient: <b>${intent.receiverLabel}</b>
+📬 To: <code>${shortWallet(intent.receiverWallet)}</code>
+💰 Fee: <b>${sendflowFee.toFixed(4)} ${sym}</b> (0.5%)
+✨ They receive: <b>${recipientGets.toFixed(6)} ${sym}</b>
+⛓ Network: Solana Mainnet${speedLine}${sponsorLine}
+
+Reply <b>YES</b> to confirm or <b>NO</b> to cancel ⏱ 60s`;
+
+      const roomId = message.roomId;
+      const entityId = message.entityId;
+      if (roomId && entityId) {
+        setPending(roomId, entityId, {
+          intent,
+          rate: { ...rate },
+          expiresAt: Date.now() + 60_000,
+          initiatorEntityId: entityId as string,
+        });
+      }
+
+      if (callback) {
+        await callback({
+          text: preview,
+          actions: ["CHECK_REMITTANCE_RATE"],
+          source: message.content.source,
+        });
+      }
+
+      const prev = (state?.values?.sendflow as Record<string, unknown> | undefined) ?? {};
+      return {
+        success: true,
+        text: preview,
+        data: { rate },
+        values: { sendflow: { ...prev, rate } },
+      };
+    }
+
     const jupiterBase =
-      getEnv(runtime, "JUPITER_PRICE_API_URL") || "https://price.jup.ag/v6";
+      getEnv(runtime, "JUPITER_PRICE_API_URL") || "https://api.jup.ag/price/v2";
     const pythBase = getEnv(runtime, "PYTH_PRICE_SERVICE_URL") || "https://hermes.pyth.network";
     const pythFeedSource = getEnv(runtime, "PYTH_FEED_ID_SOURCE");
     const pythFeedTarget = getEnv(runtime, "PYTH_FEED_ID_TARGET");
@@ -97,7 +171,7 @@ export const checkRemittanceRateAction: Action = {
     if (jupiterRecipient == null && pythRecipient == null) {
       return {
         success: false,
-        text: "❌ Could not fetch rate from Jupiter or Pyth. Try again.",
+        text: "⚠️ Rate unavailable\n\nCould not fetch a price from Jupiter or Pyth for this token pair. Please check the token mints and try again in a moment.",
       };
     }
 
@@ -127,7 +201,24 @@ export const checkRemittanceRateAction: Action = {
       fetchedAt: new Date().toISOString(),
     };
 
-    const preview = `💱 Rate fetched via ${rate.provider} | Recipient gets ${recipientGets.toFixed(6)} (target token) | Fee: ${sendflowFee.toFixed(2)} USDC | Reply YES to confirm`;
+    const targetTokenInfo = lookupToken(intent.targetMint);
+    const targetSym = targetTokenInfo?.symbol ?? shortWallet(intent.targetMint);
+    const targetEm = targetTokenInfo ? tokenEmoji(targetSym) : "🪙";
+    const speedLine2 = speed !== "normal" ? `\n${speedLabel(speed)} | Extra fee: ${estimatedExtraFee(speed)}` : "";
+    const sponsorLine2 = message.entityId ? getSponsorshipMessage(String(message.entityId)) : "";
+
+    const preview = `💱 <b>Swap Preview</b>
+
+💵 Sending: <b>${intent.amount} USDC</b>
+👤 Recipient: <b>${intent.receiverLabel}</b>
+📬 To: <code>${shortWallet(intent.receiverWallet)}</code>
+${targetEm} Swaps to: <b>${targetSym}</b>
+📊 Rate: <b>1 USDC = ${bestRate.toFixed(6)} ${targetSym}</b> (via <b>${rate.provider}</b>)
+💰 Fee: <b>${sendflowFee.toFixed(4)} USDC</b> (0.5%)
+✨ They receive: <b>${recipientGets.toFixed(6)} ${targetSym}</b>
+⛓ Network: Solana Mainnet${speedLine2}${sponsorLine2}
+
+Reply <b>YES</b> to confirm or <b>NO</b> to cancel ⏱ 60s`;
 
     const roomId = message.roomId;
     const entityId = message.entityId;
@@ -146,6 +237,7 @@ export const checkRemittanceRateAction: Action = {
           fetchedAt: rate.fetchedAt,
         },
         expiresAt: Date.now() + 60_000,
+        initiatorEntityId: entityId as string,
       });
     }
 

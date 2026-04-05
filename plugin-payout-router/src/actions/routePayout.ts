@@ -9,7 +9,7 @@ import {
 import { Keypair, PublicKey, Connection } from "@solana/web3.js";
 import bs58 from "bs58";
 import { releaseEscrow } from "@sendflow/plugin-usdc-handler";
-import type { RemittanceIntent } from "@sendflow/plugin-intent-parser";
+import { shortWallet, solscanTxLink, type RemittanceIntent, loggerCompat as logger } from "@sendflow/plugin-intent-parser";
 import { splTransferEscrowToReceiver } from "../rails/splTransfer";
 import { jupiterSwapFromEscrow } from "../rails/jupiterSwap";
 import { squadsEscrowRelease } from "../rails/squadsEscrow";
@@ -34,7 +34,7 @@ function loadKeypair(secret: string): Keypair | null {
 
 export const routePayoutAction: Action = {
   name: "ROUTE_PAYOUT",
-  similes: ["PAYOUT", "SEND_PAYOUT"],
+  similes: ["PAYOUT", "SEND_PAYOUT", "EXECUTE_TRANSFER", "RELEASE_FUNDS", "COMPLETE_TRANSFER"],
   description: "Routes USDC or swapped tokens from escrow to the receiver via SPL, Jupiter, or Squads path.",
   validate: async (_runtime, _message, state?: State) => {
     const sf = state?.values?.sendflow as { intent?: RemittanceIntent; usdc?: { amountLocked?: number } } | undefined;
@@ -87,35 +87,77 @@ export const routePayoutAction: Action = {
       }
     };
 
-    try {
-      let outcome: { txHash: string; explorerUrl: string; payoutConfirmed: boolean };
+    const MAX_RETRIES = 3;
+    const RETRY_DELAY_MS = 2000;
 
-      if (intent.targetRail === "JUPITER_SWAP") {
-        const raw = BigInt(Math.round(usdc.amountLocked * 1_000_000));
-        outcome = await jupiterSwapFromEscrow({
-          connection,
-          escrowKeypair: escrow,
-          inputMint: intent.sourceMint,
-          outputMint: intent.targetMint,
-          amountRaw: raw,
-          jupiterApiUrl: jupiterApi,
+    const adminTgId = getStr(runtime, "ADMIN_TELEGRAM_ID");
+    const botToken = getStr(runtime, "TELEGRAM_BOT_TOKEN");
+
+    const alertAdmin = async (errorMsg: string) => {
+      if (!adminTgId || !botToken) return;
+      try {
+        await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: adminTgId,
+            text: `🚨 SENDFLOW ALERT: Payout failed after ${MAX_RETRIES} retries\n\nAmount: ${usdc.amountLocked} USDC\nReceiver: ${intent.receiverWallet}\nEscrow TX: ${usdc.txHash ?? "N/A"}\nError: ${errorMsg}`,
+          }),
         });
-      } else if (intent.targetRail === "SQUADS_ESCROW") {
-        outcome = await squadsEscrowRelease({
-          connection,
-          escrowKeypair: escrow,
-          receiverWallet: intent.receiverWallet,
-          mint,
-          amountHuman: usdc.amountLocked,
-        });
-      } else {
-        outcome = await splTransferEscrowToReceiver({
-          connection,
-          escrowKeypair: escrow,
-          receiverWallet: intent.receiverWallet,
-          mint,
-          amountHuman: usdc.amountLocked,
-        });
+      } catch { /* best-effort */ }
+    };
+
+    try {
+      let outcome: { txHash: string; explorerUrl: string; payoutConfirmed: boolean } | null = null;
+      let lastError = "";
+
+      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          if (intent.targetRail === "JUPITER_SWAP") {
+            const raw = BigInt(Math.round(usdc.amountLocked * 1_000_000));
+            outcome = await jupiterSwapFromEscrow({
+              connection,
+              escrowKeypair: escrow,
+              inputMint: intent.sourceMint,
+              outputMint: intent.targetMint,
+              amountRaw: raw,
+              jupiterApiUrl: jupiterApi,
+            });
+          } else if (intent.targetRail === "SQUADS_ESCROW") {
+            outcome = await squadsEscrowRelease({
+              connection,
+              escrowKeypair: escrow,
+              receiverWallet: intent.receiverWallet,
+              mint,
+              amountHuman: usdc.amountLocked,
+            });
+          } else {
+            outcome = await splTransferEscrowToReceiver({
+              connection,
+              escrowKeypair: escrow,
+              receiverWallet: intent.receiverWallet,
+              mint,
+              amountHuman: usdc.amountLocked,
+            });
+          }
+          break;
+        } catch (err) {
+          lastError = err instanceof Error ? err.message : String(err);
+          logger.warn(`Payout attempt ${attempt}/${MAX_RETRIES} failed: ${lastError}`);
+          if (attempt < MAX_RETRIES) {
+            await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+          }
+        }
+      }
+
+      if (!outcome) {
+        logger.error(`CRITICAL: Payout failed after ${MAX_RETRIES} retries. Escrow TX: ${usdc.txHash ?? "N/A"}, Amount: ${usdc.amountLocked} USDC`);
+        await alertAdmin(lastError);
+        await refundSender();
+        return {
+          success: false,
+          text: `❌ <b>Transfer failed</b> after ${MAX_RETRIES} attempts\n\nYour funds have been <b>refunded</b> to your wallet. Please try again later.\n\n<b>Error:</b> ${lastError}`,
+        };
       }
 
       const payout = {
@@ -129,9 +171,20 @@ export const routePayoutAction: Action = {
         completedAt: new Date().toISOString(),
       };
 
+      const successMsg = [
+        `✅ <b>Transfer Complete!</b>`,
+        ``,
+        `💸 Sent: <b>${usdc.amountLocked} USDC</b>`,
+        `👤 To: <b>${intent.receiverLabel}</b>`,
+        `📬 Wallet: <code>${shortWallet(intent.receiverWallet)}</code>`,
+        `🔗 ${solscanTxLink(outcome.txHash)}`,
+        ``,
+        `⚡ Powered by SendFlow on Nosana`,
+      ].join("\n");
+
       if (callback) {
         await callback({
-          text: `✅ Payout submitted: ${outcome.explorerUrl}`,
+          text: successMsg,
           actions: ["ROUTE_PAYOUT"],
           source: message.content.source,
         });
@@ -152,10 +205,10 @@ export const routePayoutAction: Action = {
     } catch (err) {
       await refundSender();
       const msg = err instanceof Error ? err.message : String(err);
-      return {
-        success: false,
-        text: `❌ Payout failed; attempted refund to sender. ${msg}`,
-      };
+      const friendly = /timeout|timed?\s*out/i.test(msg)
+        ? "⚠️ <b>Transfer timed out</b>\n\nThe Solana network is congested. Your funds have been <b>refunded</b>. Please try again shortly."
+        : `❌ <b>Transfer failed</b>\n\nSomething went wrong during payout. Your funds have been <b>refunded</b> to your wallet.\n\n<b>Error:</b> ${msg}`;
+      return { success: false, text: friendly };
     }
   },
   examples: [],

@@ -1,0 +1,8 @@
+{
+  "userId": "u_ref_child",
+  "publicKey": "FECzd33mYUtecqr2MqANJAAEZmotE9oQdZynJnaK2V4s",
+  "encryptedPrivateKey": "af2f48de0b18b008c04f0b60ec61eda6:8493e85be9005d91fa49556711b21838:4bd6a94ca7a803f6d1d7a2abf994810529e812dfe2a5627cfe837f4b4ee83cb67bb0ffc8d55e43f5f66b76e35b791f6e0e64cc3941a1404ccb29cbfa4c0fb87c",
+  "createdAt": "2026-04-05T08:09:45.986Z",
+  "KEY_VERSION": 3,
+  "mac": "5b5bf9e1be5f915c4f929b5c3d7ced0155294252b9d2ff062f6267e6897a42c8"
+}

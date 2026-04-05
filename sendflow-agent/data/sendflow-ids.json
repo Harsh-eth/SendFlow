@@ -1,0 +1,17 @@
+{
+  "profiles": {
+    "testuser": {
+      "username": "testuser",
+      "userId": "user1",
+      "walletAddress": "wallet123",
+      "createdAt": "2026-04-05T10:18:54.366Z",
+      "profileEmoji": "⚡",
+      "bio": "",
+      "totalReceived": 0,
+      "publicProfile": true
+    }
+  },
+  "userIdToUsername": {
+    "user1": "testuser"
+  }
+}

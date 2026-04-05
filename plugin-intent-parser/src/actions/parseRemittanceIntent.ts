@@ -7,11 +7,27 @@ import {
   Memory,
   ModelType,
   State,
-  logger,
 } from "@elizaos/core";
 import type { RemittanceIntent, RemittanceRail } from "../types";
-import { getPending, isExpired } from "../pendingFlow";
+import { loggerCompat as logger } from "../utils/structuredLogger";
+import {
+  getPending,
+  isExpired,
+  isProcessing,
+  getLastRequestTime,
+  setLastRequestTime,
+} from "../pendingFlow";
 import { extractSolanaAddress, isValidReceiverWallet } from "../utils/solanaAddress";
+import { resolveSolDomain, extractSolDomain } from "../utils/resolveDomain";
+import { getContact } from "../utils/contactBook";
+import { lookupToken, TOKEN_REGISTRY, tokenEmoji } from "../utils/tokenRegistry";
+import { detectSpeedMode, speedLabel, estimatedExtraFee, type SpeedMode } from "../utils/priorityFee";
+import { resolveUsername } from "../utils/sendflowId";
+import { tryExtractPhoneRemittance } from "../utils/phoneRemittance";
+import { lookupLinkedWalletForPhone } from "../utils/phoneWalletLinks";
+import { TRANSFER_LIMITS } from "../utils/transferLimits";
+
+const RATE_LIMIT_MS = 10_000;
 
 const USDC_MAINNET = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const WSOL_MAINNET = "So11111111111111111111111111111111111111112";
@@ -64,13 +80,79 @@ function guessRailFromText(t: string): RemittanceRail {
   return "SPL_TRANSFER";
 }
 
-function extractAmount(text: string): number | undefined {
+const WORD_NUMBERS: Record<string, number> = {
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
+  thirteen: 13,
+  fourteen: 14,
+  fifteen: 15,
+  sixteen: 16,
+  seventeen: 17,
+  eighteen: 18,
+  nineteen: 19,
+  twenty: 20,
+  thirty: 30,
+  forty: 40,
+  fifty: 50,
+  sixty: 60,
+  seventy: 70,
+  eighty: 80,
+  ninety: 90,
+  hundred: 100,
+};
+
+/** Exported: tries AMOUNT_PATTERNS + word-to-number for messy user input. */
+export function extractAmountFromText(text: string): number | null {
+  const e = extractAmount(text);
+  if (e?.amount && e.amount > 0) return e.amount;
+  const lower = text.toLowerCase();
+  const payWord = lower.match(/\b(?:pay|send|transfer)\s+([a-z]+)\s+to\b/);
+  if (payWord?.[1] && WORD_NUMBERS[payWord[1]] != null) return WORD_NUMBERS[payWord[1]];
+  const tw = lower.match(/\b(twenty|thirty|forty|fifty|ten|five)\b/);
+  if (tw?.[1] && WORD_NUMBERS[tw[1]] != null) return WORD_NUMBERS[tw[1]];
+  return null;
+}
+
+function extractAmount(text: string): { amount: number; token?: string } | undefined {
   const dollar = text.match(/\$\s*([0-9]+(?:\.[0-9]{1,6})?)/);
-  if (dollar?.[1]) return Number(dollar[1]);
+  if (dollar?.[1]) return { amount: Number(dollar[1]), token: "USDC" };
   const usd = text.match(/\bUSD\s*([0-9]+(?:\.[0-9]{1,6})?)\b/i);
-  if (usd?.[1]) return Number(usd[1]);
-  const dollars = text.match(/\b([0-9]+(?:\.[0-9]{1,6})?)\s*(?:usdc|dollars|bucks)\b/i);
-  if (dollars?.[1]) return Number(dollars[1]);
+  if (usd?.[1]) return { amount: Number(usd[1]), token: "USDC" };
+
+  const stp = text.match(/\b(?:send|transfer|pay)\s+(\d+(?:\.\d+)?)\b/i);
+  if (stp?.[1]) return { amount: Number(stp[1]), token: "USDC" };
+
+  const tokenSymbols = Object.keys(TOKEN_REGISTRY).join("|");
+  const tokenAmountRegex = new RegExp(`\\b([0-9]+(?:\\.[0-9]{1,9})?)\\s*(${tokenSymbols}|dollars|bucks)\\b`, "i");
+  const tokenMatch = text.match(tokenAmountRegex);
+  if (tokenMatch?.[1]) {
+    const sym = tokenMatch[2].toUpperCase();
+    if (sym === "DOLLARS" || sym === "BUCKS") return { amount: Number(tokenMatch[1]), token: "USDC" };
+    return { amount: Number(tokenMatch[1]), token: sym };
+  }
+
+  const usdcAlt = text.match(/\b(\d+(?:\.\d+)?)\s*(usdc|usd)\b/i);
+  if (usdcAlt?.[1]) return { amount: Number(usdcAlt[1]), token: "USDC" };
+
+  const dollarWorthRegex = new RegExp(`\\$([0-9]+(?:\\.[0-9]{1,6})?)\\s+(?:worth\\s+of\\s+|of\\s+)(${tokenSymbols})`, "i");
+  const worthMatch = text.match(dollarWorthRegex);
+  if (worthMatch?.[1]) return { amount: Number(worthMatch[1]), token: worthMatch[2].toUpperCase() };
+
+  const lower = text.toLowerCase();
+  for (const [w, n] of Object.entries(WORD_NUMBERS)) {
+    if (new RegExp(`\\b${w}\\b`).test(lower)) return { amount: n, token: "USDC" };
+  }
+
   return undefined;
 }
 
@@ -80,20 +162,82 @@ function extractReceiverLabel(text: string): string {
   return m[1].trim().replace(/[.?!]+$/, "").slice(0, 120);
 }
 
-function parseDeterministic(userText: string): RemittanceIntent | null {
-  const amount = extractAmount(userText);
-  if (!amount || amount <= 0) return null;
-  const receiverWallet = extractSolanaAddress(userText);
-  if (!receiverWallet) return null;
+function wantsNonUsdcTarget(text: string): string | null {
+  const s = text.toLowerCase();
+  if (/\b(?:swap|convert|exchange)\b/.test(s)) return WSOL_MAINNET;
+  if (/\b(?:in\s+sol|to\s+sol|as\s+sol|sol\b.*?instead)\b/.test(s)) return WSOL_MAINNET;
+  if (/\bsol\b/.test(s) && !/\bsol(?:ana|scan)\b/.test(s)) return WSOL_MAINNET;
+  return null;
+}
+
+function parseDeterministic(
+  userText: string,
+  entityId?: string
+): (RemittanceIntent & { speedMode?: SpeedMode }) | null {
+  const extracted = extractAmount(userText);
+  if (!extracted || extracted.amount <= 0) return null;
+  const { amount, token: detectedToken } = extracted;
+  let receiverWallet = extractSolanaAddress(userText);
+  const solDomain = extractSolDomain(userText);
+  const sendflowM = userText.match(/\bsendflow\/([a-zA-Z0-9_]{3,20})\b/i);
+  const sendflowProfile = sendflowM ? resolveUsername(sendflowM[1]) : null;
+  let contactLabel: string | undefined;
+  if (!receiverWallet && !solDomain && !sendflowProfile?.walletAddress && entityId) {
+    const at = userText.match(/@([a-zA-Z0-9_]{3,32})\b/);
+    if (at?.[1]) {
+      const p = resolveUsername(at[1]);
+      if (p?.walletAddress) receiverWallet = p.walletAddress;
+    }
+    if (!receiverWallet) {
+      const toNamed = userText.match(/\bto\s+([A-Za-z][A-Za-z0-9_]{0,39})\b/i);
+      const payNamed = userText.match(/\b(?:pay|send)\s+(?:[a-z]+\s+)?to\s+([A-Za-z][A-Za-z0-9_]{0,39})\b/i);
+      const name = (toNamed?.[1] ?? payNamed?.[1])?.trim();
+      if (name && !/\.sol$/i.test(name)) {
+        const cw = getContact(entityId, name);
+        if (cw) {
+          receiverWallet = cw;
+          contactLabel = name;
+        }
+      }
+    }
+  }
+  const receiver = receiverWallet ?? solDomain ?? sendflowProfile?.walletAddress;
+  if (!receiver) return null;
+
+  const speed = detectSpeedMode(userText);
+
+  const tokenInfo = detectedToken ? lookupToken(detectedToken) : null;
+
+  const sendflowLabel = sendflowM ? `sendflow/${sendflowM[1].toLowerCase()}` : undefined;
+  const receiverLabelBase = contactLabel ?? sendflowLabel ?? solDomain ?? extractReceiverLabel(userText);
+
+  if (tokenInfo && tokenInfo.symbol !== "USDC") {
+    return {
+      amount,
+      sourceMint: USDC_MAINNET,
+      targetMint: tokenInfo.mint,
+      targetRail: "JUPITER_SWAP" as RemittanceRail,
+      receiverLabel: receiverLabelBase,
+      receiverWallet: receiver,
+      memo: undefined,
+      confidence: 0.45,
+      speedMode: speed,
+    };
+  }
+
+  const nonUsdcTarget = wantsNonUsdcTarget(userText);
+  const targetMint = nonUsdcTarget ?? USDC_MAINNET;
+  const targetRail = nonUsdcTarget ? "JUPITER_SWAP" as RemittanceRail : guessRailFromText(userText);
   return {
     amount,
     sourceMint: USDC_MAINNET,
-    targetMint: WSOL_MAINNET,
-    targetRail: guessRailFromText(userText),
-    receiverLabel: extractReceiverLabel(userText),
-    receiverWallet,
+    targetMint,
+    targetRail,
+    receiverLabel: receiverLabelBase,
+    receiverWallet: receiver,
     memo: undefined,
     confidence: 0.45,
+    speedMode: speed,
   };
 }
 
@@ -137,14 +281,15 @@ async function parseWithLlm(
 
 export const parseRemittanceIntentAction: Action = {
   name: "PARSE_REMITTANCE_INTENT",
-  similes: ["PARSE_INTENT", "REMITTANCE_INTENT", "SEND_MONEY_INTENT"],
+  similes: ["PARSE_INTENT", "REMITTANCE_INTENT", "SEND_MONEY_INTENT", "SEND_USDC", "TRANSFER_USDC", "REMIT", "SEND_MONEY", "TRANSFER_MONEY"],
   description:
     "Parses natural language into SendFlow intent: USDC amount, mints, Solana rail, receiver wallet.",
   validate: async (_runtime: IAgentRuntime, message: Memory) => {
     const text = message?.content?.text?.trim();
     if (!text || text.length < 3) return false;
-    const roomId = message.roomId;
     const entityId = message.entityId;
+    if (entityId && isProcessing(entityId as string)) return false;
+    const roomId = message.roomId;
     if (roomId && entityId) {
       const p = getPending(roomId, entityId);
       if (p && !isExpired(p)) return false;
@@ -158,6 +303,19 @@ export const parseRemittanceIntentAction: Action = {
     _options?: unknown,
     callback?: HandlerCallback
   ): Promise<ActionResult> => {
+    const entityId = message.entityId as string;
+
+    const elapsed = Date.now() - getLastRequestTime(entityId);
+    if (elapsed < RATE_LIMIT_MS) {
+      const wait = Math.ceil((RATE_LIMIT_MS - elapsed) / 1000);
+      const text = `⏱ <b>Please wait ${wait}s</b> before sending another request.`;
+      if (callback) {
+        await callback({ text, actions: ["PARSE_REMITTANCE_INTENT"], source: message.content.source });
+      }
+      return { success: false, text };
+    }
+    setLastRequestTime(entityId);
+
     const userText = message.content.text ?? "";
     if (callback) {
       await callback({
@@ -167,24 +325,142 @@ export const parseRemittanceIntentAction: Action = {
       });
     }
 
+    const phoneRm = tryExtractPhoneRemittance(userText);
+    if (phoneRm) {
+      const linked = lookupLinkedWalletForPhone(phoneRm.normalizedPhone);
+      if (linked) {
+        const mint = runtime.getSetting("USDC_MINT") || "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+        const intent: RemittanceIntent = {
+          amount: phoneRm.amount,
+          sourceMint: typeof mint === "string" ? mint : String(mint),
+          targetMint: typeof mint === "string" ? mint : String(mint),
+          targetRail: "SPL_TRANSFER",
+          receiverLabel: `📱 ${phoneRm.normalizedPhone}`,
+          receiverWallet: linked,
+          confidence: 1,
+        };
+        return {
+          success: true,
+          text: "phone_linked_wallet_intent",
+          values: { sendflow: { intent } },
+        };
+      }
+      return {
+        success: true,
+        text: "phone_claim_intent",
+        values: {
+          sendflow: {
+            phoneClaim: {
+              normalizedPhone: phoneRm.normalizedPhone,
+              amount: phoneRm.amount,
+            },
+          },
+        },
+      };
+    }
+
     const llmIntent = await parseWithLlm(runtime, userText);
-    const fallback = parseDeterministic(userText);
+    const fallback = parseDeterministic(userText, entityId);
     const intent =
       llmIntent && llmIntent.confidence >= 0.6 ? llmIntent : fallback ?? llmIntent;
+
+    const speedMode = (fallback as any)?.speedMode ?? detectSpeedMode(userText);
 
     if (!intent) {
       return {
         success: false,
-        text:
-          'Could not parse a valid SendFlow request. Include amount in USDC and the receiver Solana wallet address. Example: "Send 100 USDC to Mom at <wallet>".',
+        text: [
+          `⚠️ <b>Couldn't parse your request</b>`,
+          ``,
+          `<b>Please include:</b>`,
+          `• Amount in USDC (e.g. 10 USDC)`,
+          `• Recipient Solana wallet address`,
+          ``,
+          `Example: "Send 100 USDC to 7xKX...sAsU"`,
+        ].join("\n"),
       };
+    }
+
+    function applySendflowResolution(rintent: RemittanceIntent): { ok: true } | { ok: false; text: string } {
+      const w = rintent.receiverWallet.trim();
+      const wl = w.toLowerCase();
+      if (wl.startsWith("sendflow/")) {
+        const uname = wl.slice("sendflow/".length);
+        const profile = resolveUsername(uname);
+        if (!profile) {
+          return { ok: false, text: `⚠️ <b>sendflow/${uname}</b> not found. Ask them to claim a username first.` };
+        }
+        rintent.receiverWallet = profile.walletAddress;
+        rintent.receiverLabel = `sendflow/${uname}`;
+        return { ok: true };
+      }
+      const lab = rintent.receiverLabel.trim().toLowerCase();
+      if (lab.startsWith("sendflow/")) {
+        const uname = lab.slice("sendflow/".length);
+        const profile = resolveUsername(uname);
+        if (!profile) {
+          return { ok: false, text: `⚠️ <b>sendflow/${uname}</b> not found.` };
+        }
+        rintent.receiverWallet = profile.walletAddress;
+        rintent.receiverLabel = `sendflow/${uname}`;
+        return { ok: true };
+      }
+      return { ok: true };
+    }
+
+    const sfRes = applySendflowResolution(intent);
+    if (!sfRes.ok) {
+      return { success: false, text: sfRes.text };
+    }
+
+    if (!isValidReceiverWallet(intent.receiverWallet)) {
+      const contactWallet = getContact(entityId, intent.receiverLabel) ?? getContact(entityId, intent.receiverWallet);
+      if (contactWallet) {
+        logger.info(`Resolved contact "${intent.receiverLabel}" → ${contactWallet}`);
+        intent.receiverWallet = contactWallet;
+      }
+    }
+
+    if (intent.receiverWallet.endsWith(".sol")) {
+      const rpcUrl = (() => {
+        const v = runtime.getSetting("SOLANA_RPC_URL");
+        return typeof v === "string" && v ? v : "https://api.mainnet-beta.solana.com";
+      })();
+      try {
+        intent.receiverWallet = await resolveSolDomain(intent.receiverWallet, rpcUrl);
+        logger.info(`Resolved ${intent.receiverLabel} → ${intent.receiverWallet}`);
+      } catch {
+        return {
+          success: false,
+          text: `⚠️ <b>Could not resolve</b> ${intent.receiverLabel ?? intent.receiverWallet}\n\nPlease check the .sol domain or use a wallet address directly.`,
+        };
+      }
     }
 
     if (!isValidReceiverWallet(intent.receiverWallet)) {
       return {
         success: false,
-        text:
-          "That receiver wallet does not look like a valid Solana address. Please paste a valid Solana public key (base58).",
+        text: `⚠️ <b>Invalid wallet address</b>\n\nThe address "${intent.receiverWallet.slice(0, 8)}…" is not a valid Solana public key. Please paste a valid base58 address.`,
+      };
+    }
+
+    const minRaw = runtime.getSetting("MIN_TRANSFER_USDC");
+    const maxRaw = runtime.getSetting("MAX_TRANSFER_USDC");
+    const minTransfer =
+      typeof minRaw === "string" && minRaw ? Number(minRaw) : TRANSFER_LIMITS.MIN_USDC;
+    const maxTransfer =
+      typeof maxRaw === "string" && maxRaw ? Number(maxRaw) : TRANSFER_LIMITS.MAX_USDC;
+
+    if (intent.amount < minTransfer) {
+      return {
+        success: false,
+        text: `⚠️ <b>Amount too small</b>\n\nMinimum transfer is ${minTransfer} USDC. You requested ${intent.amount} USDC.`,
+      };
+    }
+    if (intent.amount > maxTransfer) {
+      return {
+        success: false,
+        text: `⚠️ <b>Amount too large</b>\n\nMaximum transfer is ${maxTransfer} USDC. You requested ${intent.amount} USDC.`,
       };
     }
 
@@ -195,6 +471,7 @@ export const parseRemittanceIntentAction: Action = {
       values: {
         sendflow: {
           intent,
+          speedMode,
         },
       },
     };

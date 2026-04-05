@@ -1,0 +1,8 @@
+{
+  "userId": "u_hi_1",
+  "publicKey": "EXQzhwevA6ydgGbgQTZVDW23NJjkfXb8VzmAMMXX5hy4",
+  "encryptedPrivateKey": "742da7c03cd342df85f3033de98dfbd4:ad8ffa174669ac6b38d2b6382d68531a:fcd961bc0200efa22fd00425197a0b88c71cdd28cc7ab0c6efe7a10a60eba04445b792ae0b3095372449ef17208550a9f750b092f3ed8ddf336c0ee4b25fdc81",
+  "createdAt": "2026-04-05T08:09:44.660Z",
+  "KEY_VERSION": 3,
+  "mac": "24173e13af36c6a21f6ecf97d48868ef5919c03078014eaf31b8f37f3f99f74e"
+}

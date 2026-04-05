@@ -5,9 +5,19 @@ import {
   IAgentRuntime,
   Memory,
   State,
-  logger,
 } from "@elizaos/core";
-import type { RemittanceIntent } from "@sendflow/plugin-intent-parser";
+import {
+  shortWallet,
+  solscanTxLink,
+  type RemittanceIntent,
+  loggerCompat as logger,
+  calculateSavings,
+  formatSavingsShareMessage,
+  appendSavingsLedgerEntry,
+  consumeSavingsMilestones,
+  getUserLanguage,
+  getLifetimeSavings,
+} from "@sendflow/plugin-intent-parser";
 
 function getStr(runtime: IAgentRuntime, key: string): string {
   const v = runtime.getSetting(key);
@@ -34,7 +44,7 @@ async function telegramSend(token: string, chatId: string, text: string): Promis
 
 export const notifyPartiesAction: Action = {
   name: "NOTIFY_PARTIES",
-  similes: ["NOTIFY_SENDFLOW", "SEND_NOTIFICATIONS"],
+  similes: ["NOTIFY_SENDFLOW", "SEND_NOTIFICATIONS", "ALERT_PARTIES", "NOTIFY_SENDER", "NOTIFY_RECEIVER"],
   description: "Sends SendFlow completion messages to sender and receiver on Telegram when possible.",
   validate: async (_runtime, _message, state?: State) => {
     const sf = state?.values?.sendflow as { payout?: { txHash?: string }; intent?: RemittanceIntent } | undefined;
@@ -69,8 +79,36 @@ export const notifyPartiesAction: Action = {
 
     const senderName = getStr(runtime, "SENDFLOW_SENDER_DISPLAY_NAME") || "Sender";
 
-    const txUrl = payout.explorerUrl ?? `https://solscan.io/tx/${payout.txHash}`;
-    const senderLine = `✅ Sent! ${intent.receiverLabel} receives ${payout.amountSent} USDC | 🔗 ${txUrl}`;
+    const entityId = message.entityId != null ? String(message.entityId) : "";
+    const feeLamportsRawEarly = getStr(runtime, "LAST_TRANSFER_FEE_LAMPORTS");
+    const parsedFeeEarly = Number(feeLamportsRawEarly);
+    const txFeeLamportsEarly =
+      Number.isFinite(parsedFeeEarly) && parsedFeeEarly > 0 ? Math.floor(parsedFeeEarly) : 5000;
+    const langEarly = entityId ? getUserLanguage(entityId) : "en";
+    const savingsPreview = calculateSavings(payout.amountSent, txFeeLamportsEarly, {
+      language: langEarly,
+      recipientLabel: intent.receiverLabel,
+      receiverWallet: intent.receiverWallet,
+    });
+    const priorSaved = entityId ? getLifetimeSavings(entityId).totalSavedUsd : 0;
+    const totalWithThisTx = priorSaved + savingsPreview.savingVsWU;
+    const savingsBlock = [
+      ``,
+      `<b>What you saved:</b>`,
+      `Western Union: <b>$${savingsPreview.westernUnionFeeUsd.toFixed(2)}</b>`,
+      `SendFlow: <b>$${savingsPreview.sendflowFeeUsd.toFixed(4)}</b>`,
+      `<b>Saved on this transfer: $${savingsPreview.savingVsWU.toFixed(2)} 🎉</b>`,
+      `Total saved with SendFlow: <b>$${totalWithThisTx.toFixed(2)}</b>`,
+    ].join("\n");
+
+    const senderLine = [
+      `✅ <b>Transfer Complete!</b>`,
+      `💸 Sent: <b>${payout.amountSent} USDC</b>`,
+      `👤 To: <b>${intent.receiverLabel}</b> (<code>${shortWallet(intent.receiverWallet)}</code>)`,
+      `🔗 ${solscanTxLink(payout.txHash)}`,
+      `⚡ Powered by SendFlow on Nosana`,
+      savingsBlock,
+    ].join("\n");
 
     try {
       if (senderChat) {
@@ -86,11 +124,15 @@ export const notifyPartiesAction: Action = {
     try {
       const recvId = sf?.receiverTelegramId;
       if (recvId) {
-        await telegramSend(
-          token,
-          recvId,
-          `💸 ${payout.amountSent} USDC sent to your wallet from ${senderName}`
-        );
+        const receiverLine = [
+          `✅ <b>Transfer Complete!</b>`,
+          `💸 Received: <b>${payout.amountSent} USDC</b>`,
+          `👤 From: <b>${senderName}</b>`,
+          `🔗 ${solscanTxLink(payout.txHash)}`,
+          `⚡ Powered by SendFlow on Nosana`,
+          savingsBlock,
+        ].join("\n");
+        await telegramSend(token, recvId, receiverLine);
       } else {
         logger.info("sendflow: no receiverTelegramId; skip receiver notify");
       }
@@ -98,6 +140,60 @@ export const notifyPartiesAction: Action = {
       const msg = e instanceof Error ? e.message : String(e);
       return { success: false, text: `❌ Notify receiver failed: ${msg}` };
     }
+
+    const feeLamportsRaw = getStr(runtime, "LAST_TRANSFER_FEE_LAMPORTS");
+    const parsedFee = Number(feeLamportsRaw);
+    const txFeeLamports = Number.isFinite(parsedFee) && parsedFee > 0 ? Math.floor(parsedFee) : 5000;
+    const botUsername = getStr(runtime, "TELEGRAM_BOT_USERNAME");
+    const lang = entityId ? getUserLanguage(entityId) : "en";
+    const savings = calculateSavings(payout.amountSent, txFeeLamports, {
+      language: lang,
+      recipientLabel: intent.receiverLabel,
+      receiverWallet: intent.receiverWallet,
+    });
+
+    void appendSavingsLedgerEntry(entityId || "unknown", {
+      ts: new Date().toISOString(),
+      amountUsdc: payout.amountSent,
+      savedVsWU: savings.savingVsWU,
+      txSig: payout.txHash,
+    })
+      .then(() => {
+        setTimeout(() => {
+          void (async () => {
+            try {
+              if (senderChat) {
+                await telegramSend(token, senderChat, formatSavingsShareMessage(savings));
+              }
+            } catch (err) {
+              logger.warn(`sendflow savings share message failed: ${err}`);
+            }
+          })();
+        }, 1500);
+        setTimeout(() => {
+          void (async () => {
+            try {
+              const milestones = await consumeSavingsMilestones(entityId || "unknown", botUsername || undefined);
+              if (!senderChat) return;
+              let delay = 0;
+              for (const m of milestones) {
+                const d = delay;
+                setTimeout(() => {
+                  void telegramSend(token, senderChat!, m).catch((err) =>
+                    logger.warn(`sendflow savings milestone send failed: ${err}`)
+                  );
+                }, d);
+                delay += 900;
+              }
+            } catch (err) {
+              logger.warn(`sendflow savings milestone failed: ${err}`);
+            }
+          })();
+        }, 3200);
+      })
+      .catch((err) => {
+        logger.warn(`sendflow savings ledger append failed: ${err}`);
+      });
 
     const notification = {
       senderNotified: Boolean(senderChat),

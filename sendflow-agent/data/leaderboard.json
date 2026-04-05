@@ -1,0 +1,13 @@
+{
+  "optIn": {
+    "user1_lb": true
+  },
+  "stats": {
+    "user1_lb": {
+      "totalSent": 2600,
+      "transferCount": 26,
+      "memberSince": "2026-04-04T14:47:27.197Z",
+      "displayName": "Tester"
+    }
+  }
+}

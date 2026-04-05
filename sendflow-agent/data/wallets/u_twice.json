@@ -1,0 +1,8 @@
+{
+  "userId": "u_twice",
+  "publicKey": "MfN3WKySc4GeAnZtjkyhgYPc7q82jjpyKdVQvEiQJdU",
+  "encryptedPrivateKey": "e6305b6aa68c39e933e8e69c17985d5d:52268f3f490dd7c6fad50945c1a52948:fbd915204cfbd74b5c59527bc7aa4cd96f9031f7951c180879615f9c2fe1b8ee6def22cf62d0e2e6d64b0ac0f2d188270b402c56bc73634c623e2ce3a6a8b279",
+  "createdAt": "2026-04-05T08:09:46.001Z",
+  "KEY_VERSION": 3,
+  "mac": "b0acc1cabdc31834335efaeef913e2da55b1d88c2a65d77255848217ac28e3bd"
+}
