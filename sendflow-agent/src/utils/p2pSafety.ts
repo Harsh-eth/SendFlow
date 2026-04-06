@@ -10,29 +10,36 @@ function envNum(key: string, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+/** `P2P_MAX_DAILY_NEW_USER` preferred; `P2P_MAX_DAY_NEW_USER` kept for older .env files. */
+function envNumNewUserDaily(fallback: number): number {
+  const primary = Number(process.env.P2P_MAX_DAILY_NEW_USER ?? "");
+  if (Number.isFinite(primary) && primary > 0) return primary;
+  return envNum("P2P_MAX_DAY_NEW_USER", fallback);
+}
+
 export type P2pTier = "new_user" | "regular" | "trusted" | "verified";
 
 export function tierLimits(tier: P2pTier): { maxPerTrade: number; maxPerDay: number } {
   switch (tier) {
     case "verified":
       return {
-        maxPerTrade: envNum("P2P_MAX_TRADE_VERIFIED", 2000),
-        maxPerDay: envNum("P2P_MAX_DAY_VERIFIED", 10_000),
+        maxPerTrade: envNum("P2P_MAX_TRADE_VERIFIED", 5000),
+        maxPerDay: envNum("P2P_MAX_DAY_VERIFIED", 25_000),
       };
     case "trusted":
       return {
-        maxPerTrade: envNum("P2P_MAX_TRADE_TRUSTED", 500),
-        maxPerDay: envNum("P2P_MAX_DAY_TRUSTED", 2000),
+        maxPerTrade: envNum("P2P_MAX_TRADE_TRUSTED", 1000),
+        maxPerDay: envNum("P2P_MAX_DAY_TRUSTED", 5000),
       };
     case "regular":
       return {
-        maxPerTrade: envNum("P2P_MAX_TRADE_REGULAR", 100),
-        maxPerDay: envNum("P2P_MAX_DAY_REGULAR", 500),
+        maxPerTrade: envNum("P2P_MAX_TRADE_REGULAR", 200),
+        maxPerDay: envNum("P2P_MAX_DAY_REGULAR", 1000),
       };
     default:
       return {
-        maxPerTrade: envNum("P2P_MAX_TRADE_NEW_USER", 10),
-        maxPerDay: envNum("P2P_MAX_DAY_NEW_USER", 20),
+        maxPerTrade: envNum("P2P_MAX_TRADE_NEW_USER", 50),
+        maxPerDay: envNumNewUserDaily(100),
       };
   }
 }

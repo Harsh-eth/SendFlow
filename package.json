@@ -13,6 +13,7 @@
     "sendflow-agent"
   ],
   "scripts": {
+    "postinstall": "node scripts/ensure-telegram-callback-updates.mjs",
     "build": "bun run --filter @sendflow/plugin-intent-parser build && bun run --filter @sendflow/plugin-usdc-handler build && bun run --filter @sendflow/plugin-payout-router build && bun run --filter @sendflow/plugin-notifier build && bun run --filter @sendflow/plugin-rate-checker build && bun run --filter @sendflow/sendflow-agent build",
     "test": "bun run --filter '*' test",
     "stress-test": "bun scripts/stress-test.ts"

@@ -286,15 +286,54 @@ export const parseRemittanceIntentAction: Action = {
     "Parses natural language into SendFlow intent: USDC amount, mints, Solana rail, receiver wallet.",
   validate: async (_runtime: IAgentRuntime, message: Memory) => {
     const text = message?.content?.text?.trim();
-    if (!text || text.length < 3) return false;
-    const entityId = message.entityId;
-    if (entityId && isProcessing(entityId as string)) return false;
+    if (!text) return false;
+    const entityId = message.entityId as string | undefined;
+    if (entityId && isProcessing(entityId)) return false;
     const roomId = message.roomId;
     if (roomId && entityId) {
       const p = getPending(roomId, entityId);
       if (p && !isExpired(p)) return false;
     }
-    return true;
+
+    const lower = text.toLowerCase();
+    if (/\b(?:split|each\s+to|equally\s+between|equally\s+among)\b/.test(lower)) return false;
+
+    if (/\bbuy\b/.test(lower) && /\busdc\b/.test(lower) && !/\b(?:send|transfer|pay)\b/.test(lower)) {
+      return false;
+    }
+
+    const amount = extractAmountFromText(text);
+    if (amount == null || amount <= 0) return false;
+
+    if (extractSolanaAddress(text)) return true;
+    if (extractSolDomain(text)) return true;
+
+    const sendflowM = text.match(/\bsendflow\/([a-zA-Z0-9_]{3,20})\b/i);
+    if (sendflowM?.[1] && resolveUsername(sendflowM[1])?.walletAddress) return true;
+
+    const at = text.match(/@([a-zA-Z0-9_]{3,32})\b/);
+    if (at?.[1] && resolveUsername(at[1])?.walletAddress) return true;
+
+    if (tryExtractPhoneRemittance(text)) return true;
+
+    if (/\bto\s+(?:my\s+)?(?:friend|friends|buddy|buddies|someone|anyone|them|him|her|there)\b/i.test(lower)) {
+      return false;
+    }
+
+    if (entityId) {
+      const toNamed = text.match(/\bto\s+([A-Za-z][A-Za-z0-9_]{0,39})\b/i);
+      const payNamed = text.match(/\b(?:pay|send)\s+(?:[a-z]+\s+)?to\s+([A-Za-z][A-Za-z0-9_]{0,39})\b/i);
+      let name = (toNamed?.[1] ?? payNamed?.[1])?.trim();
+      if (name && /^(my|a|the|our|your)$/i.test(name)) {
+        const ext = text.match(/\bto\s+(?:my|a|the|our|your)\s+([A-Za-z][A-Za-z0-9_]{0,39})\b/i);
+        name = ext?.[1]?.trim();
+      }
+      if (name && !/^(friend|friends|buddy|someone)$/i.test(name) && !/\.sol$/i.test(name)) {
+        if (getContact(entityId, name)) return true;
+      }
+    }
+
+    return false;
   },
   handler: async (
     runtime: IAgentRuntime,

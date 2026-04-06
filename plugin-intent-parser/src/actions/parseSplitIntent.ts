@@ -68,8 +68,12 @@ export const parseSplitIntentAction: Action = {
   similes: ["SPLIT_PAYMENT", "SPLIT_USDC", "SEND_EACH", "SPLIT_EQUALLY"],
   description: "Split a USDC amount equally between multiple wallets.",
   validate: async (_runtime: IAgentRuntime, message: Memory) => {
-    const text = (message?.content?.text ?? "").trim().toLowerCase();
-    return /\b(?:split|each\s+to|equally\s+between|equally\s+among)\b/.test(text);
+    const raw = (message?.content?.text ?? "").trim();
+    const lower = raw.toLowerCase();
+    if (!/\b(?:split|each\s+to|equally\s+between|equally\s+among)\b/.test(lower)) return false;
+    const amountInfo = extractAmount(raw);
+    if (!amountInfo || amountInfo.total <= 0) return false;
+    return extractRecipients(raw).length >= 2;
   },
   handler: async (
     runtime: IAgentRuntime,

@@ -11,6 +11,7 @@ import {
   type HandlerCallback,
 } from "@elizaos/core";
 import { TelegramService } from "@elizaos/plugin-telegram";
+import type { Context as TelegrafContext } from "telegraf";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import { readFile, writeFile } from "node:fs/promises";
@@ -469,16 +470,45 @@ function cleanElizaXmlTextContent(raw: string): string {
 
 /** Strip thinking noise and isolate JSON for OBJECT_SMALL when the model wraps output. */
 function cleanJsonObjectStringFromLlm(raw: string): string {
-  let s = raw;
-  s = s.replace(/<redacted_thinking>[\s\S]*?<\/redacted_thinking>/gi, "");
-  s = s.replace(/<think>[\s\S]*?<\/think>/gi, "");
-  s = s.trim();
-  const first = s.indexOf("{");
-  const last = s.lastIndexOf("}");
-  if (first !== -1 && last !== -1 && last > first) {
-    s = s.slice(first, last + 1);
+  let cleaned = raw;
+  cleaned = cleaned.replace(/<redacted_thinking>[\s\S]*?<\/redacted_thinking>/gi, "");
+  cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, "");
+  cleaned = cleaned.trim();
+  const startIdx = cleaned.indexOf("{");
+  if (startIdx === -1) return "{}";
+
+  let depth = 0;
+  let endIdx = -1;
+  for (let i = startIdx; i < cleaned.length; i++) {
+    const c = cleaned[i]!;
+    if (c === "{") depth++;
+    else if (c === "}") {
+      depth--;
+      if (depth === 0) {
+        endIdx = i;
+        break;
+      }
+    }
   }
-  return s.trim();
+
+  let slice: string;
+  if (endIdx === -1) {
+    slice = cleaned.slice(startIdx);
+    slice = slice.replace(/,\s*$/, "");
+    slice = slice.replace(/,\s*"[^"]*"\s*:\s*[^,}\]]*$/, "");
+    const openBraces = (slice.match(/{/g) ?? []).length;
+    const closeBraces = (slice.match(/}/g) ?? []).length;
+    slice += "}".repeat(Math.max(0, openBraces - closeBraces));
+  } else {
+    slice = cleaned.slice(startIdx, endIdx + 1);
+  }
+
+  try {
+    JSON.parse(slice);
+    return slice;
+  } catch {
+    return "{}";
+  }
 }
 
 /** Assistant text from Ollama `POST /api/chat` (OBJECT_SMALL). Qwen may use `message.thinking` when `content` is empty. */
@@ -847,7 +877,7 @@ function registerNosanaModels(
             keep_alive: "10m",
             options: {
               temperature: 0.1,
-              num_predict: 1000,
+              num_predict: 600,
               top_p: 0.9,
             },
           }),
@@ -3418,33 +3448,26 @@ startDigestScheduler(async (chatId: string, text: string) => {
 });
 
 if (botToken) {
-  const pollCallbackQueries = async () => {
-    let offset = 0;
-    const poll = async () => {
-      try {
-        const res = await fetch(`https://api.telegram.org/bot${botToken}/getUpdates?offset=${offset}&timeout=30&allowed_updates=["callback_query"]`, {
-          signal: AbortSignal.timeout(35_000),
-        });
-        if (!res.ok) return;
-        const data = (await res.json()) as { result?: Array<{ update_id: number; callback_query?: { id: string; data?: string; from?: { id: number }; message?: { chat?: { id: number } } } }> };
-        for (const update of data.result ?? []) {
-          offset = update.update_id + 1;
-          const cbq = update.callback_query;
-          if (!cbq?.data) continue;
-          const cbChatId = cbq.message?.chat?.id ? String(cbq.message.chat.id) : null;
-          const cbTgUserId = cbq.from?.id ? String(cbq.from.id) : null;
-          if (!cbChatId || !cbTgUserId) continue;
+  /** Inline keyboard callbacks — must use the same Telegraf `getUpdates` as @elizaos/plugin-telegram (no second long-poll). */
+  const handleInlineCallbackQuery = async (cbq: {
+    id: string;
+    data?: string;
+    from?: { id: number };
+    message?: { chat?: { id: number } };
+  }): Promise<void> => {
+    if (!cbq?.data) return;
+    const cbChatId = cbq.message?.chat?.id ? String(cbq.message.chat.id) : null;
+    const cbTgUserId = cbq.from?.id ? String(cbq.from.id) : null;
+    if (!cbChatId || !cbTgUserId) return;
 
-          const cbEntityId = createUniqueUuid(runtime, cbTgUserId);
-          rememberTelegramChat(cbEntityId, cbChatId);
+    const cbEntityId = createUniqueUuid(runtime, cbTgUserId);
+    rememberTelegramChat(cbEntityId, cbChatId);
 
-          await answerCbQuery(cbq.id);
-
-          const cbData = cbq.data;
-          const p2pCtxPoll = p2pFlowCtx();
-          if (await handleP2PCallback(cbData, cbEntityId, cbChatId, p2pCtxPoll, cbTgUserId)) {
-            continue;
-          }
+    const cbData = cbq.data;
+    const p2pCtxPoll = p2pFlowCtx();
+    if (await handleP2PCallback(cbData, cbEntityId, cbChatId, p2pCtxPoll, cbTgUserId)) {
+      return;
+    }
           if (cbData === "action_send") {
             startWizard(cbEntityId);
             await sendTgWithKeyboard(cbChatId, `💸 <b>Step 1/3:</b> How much USDC to send?`, amountKeyboard());
@@ -4007,15 +4030,22 @@ if (botToken) {
           } else if (cbData === "settings_business") {
             await sendTgHtml(cbChatId, `Type <code>enable business mode</code> to unlock business features.`);
           }
-        }
-      } catch (e) {
-        log.error("telegram.callback_poll_failed", {}, e instanceof Error ? e : new Error(String(e)));
-      }
-      setTimeout(poll, 100);
-    };
-    poll();
   };
-  pollCallbackQueries();
+
+  const telegramBot = (telegramService as { bot?: import("telegraf").Telegraf } | null)?.bot;
+  if (telegramBot && !isAgentE2e) {
+    telegramBot.on("callback_query", async (ctx: TelegrafContext) => {
+      try {
+        const cbq = ctx.callbackQuery;
+        if (!cbq || !("data" in cbq) || typeof cbq.data !== "string") return;
+        await ctx.answerCbQuery().catch(() => {});
+        await handleInlineCallbackQuery(cbq);
+      } catch (e) {
+        log.error("telegram.callback_handler_failed", {}, e instanceof Error ? e : new Error(String(e)));
+      }
+    });
+  }
+
   const rpcQueueInterval = setInterval(() => {
     void processRpcRetryQueue(runtime, connection, undefined, async (cid, text) => {
       await sendTgHtml(cid, text);
